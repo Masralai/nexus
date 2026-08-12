@@ -4,6 +4,7 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "target": "esnext",
+    "jsx": "react-jsx",
     "types": ["bun"],
     "noEmit": true,
     "skipLibCheck": true,

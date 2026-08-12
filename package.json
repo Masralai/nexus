@@ -2,7 +2,9 @@
   "name": "nexus",
   "version": "0.1.0",
   "type": "module",
-  "bin": { "harness": "src/cli/main.ts" },
+  "bin": {
+    "harness": "src/cli/main.ts"
+  },
   "scripts": {
     "dev": "bun run src/cli/main.ts",
     "test": "bun test",
@@ -10,6 +12,11 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/react": "^19.2.18",
     "typescript": "^5"
+  },
+  "dependencies": {
+    "ink": "^7.1.1",
+    "react": "^19.2.8"
   }
 }
