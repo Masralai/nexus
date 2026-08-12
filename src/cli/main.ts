@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
+import { createProvider } from "../providers"
+import { defaultTools } from "../tools"
+import { runTUI } from "../tui"
 import { loadConfig } from "./config"
 
 const argv = process.argv.slice(2)
@@ -11,10 +14,22 @@ const task = rest.filter((a) => a !== "--model" && a !== model).join(" ")
 switch (cmd) {
   case "run": {
     const cfg = loadConfig({ model })
-    console.log(`task: ${task || "(none)"}`)
-    console.log(`provider=${cfg.provider} model=${cfg.model || "(default)"} maxSteps=${cfg.maxSteps}`)
-    console.log("engine not built yet — lands in M1")
-    process.exit(1)
+    const apiKey = cfg.provider === "anthropic" ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY
+    const provider = createProvider({
+      provider: cfg.provider,
+      model: cfg.model,
+      apiKey: apiKey || undefined,
+      baseUrl: process.env.OPENAI_BASE_URL,
+    })
+    runTUI({
+      provider,
+      registry: new Map(defaultTools().map((t) => [t.name, t])),
+      cwd: process.cwd(),
+      model: cfg.model || "(default)",
+      maxSteps: cfg.maxSteps,
+      task,
+    })
+    break
   }
   case "resume":
   case "self-test":
