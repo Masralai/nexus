@@ -13,9 +13,10 @@ import { JSONLStore } from "../engine/state"
 import type { Message } from "../engine/types"
 import type { AgentMode } from "../engine/mode"
 import { PRESETS, getPreset, otherPreset } from "../providers/presets"
+import { discoverSkills, findSkill, type Skill } from "../skills"
 import { LineInput } from "./line-input"
 import { Picker } from "./picker"
-import { HELP, filterSlashCommands, parseSlash } from "./slash"
+import { HELP, filterSlashCommands, parseSlash, parseSlashArgs } from "./slash"
 import { reduceEvent, initialTUIState, settleTurnView } from "./state"
 import type { TUIState } from "./state"
 import { formatTranscript } from "./transcript"
@@ -39,6 +40,7 @@ export function Shell() {
   const [log, setLog] = useState<string[]>([])
   const [slashIdx, setSlashIdx] = useState(0)
   const [mode, setMode] = useState<AgentMode>("build")
+  const [activeSkills, setActiveSkills] = useState<Skill[]>([])
   const acRef = useRef<AbortController | null>(null)
 
   const pushLog = (line: string) => setLog((l) => [...l, line])
@@ -139,6 +141,62 @@ export function Shell() {
     })
   }
 
+  function activateSkill(skill: Skill) {
+    setActiveSkills((prev) => {
+      if (prev.some((s) => s.id === skill.id)) return prev
+      return [...prev, skill]
+    })
+    pushLog(`skill on: ${skill.name}`)
+  }
+
+  function startSkillFlow() {
+    const catalog = discoverSkills()
+    if (catalog.length === 0) {
+      pushLog("no skills found (~/.agents/skills, ~/.claude/skills, ~/.cursor/skills-cursor, .agents/skills)")
+      return
+    }
+    setOverlay({
+      kind: "picker",
+      title: "Activate skill (/skill)",
+      items: [
+        ...catalog.map((s) => ({
+          id: s.id,
+          label: s.description ? `${s.name} — ${s.description.slice(0, 60)}` : s.name,
+        })),
+        ...(activeSkills.length ? [{ id: "__clear__", label: "Clear active skills" }] : []),
+      ],
+      then: (id) => {
+        setOverlay(null)
+        if (id === "__clear__") {
+          setActiveSkills([])
+          pushLog("skills cleared")
+          return
+        }
+        const skill = catalog.find((s) => s.id === id)
+        if (skill) activateSkill(skill)
+      },
+    })
+  }
+
+  function handleSkillCommand(args: string) {
+    if (!args || args === "list") {
+      startSkillFlow()
+      return
+    }
+    if (args === "clear" || args === "off") {
+      setActiveSkills([])
+      pushLog("skills cleared")
+      return
+    }
+    const catalog = discoverSkills()
+    const skill = findSkill(catalog, args)
+    if (!skill) {
+      pushLog(`unknown skill: ${args} — try /skill`)
+      return
+    }
+    activateSkill(skill)
+  }
+
   function startResumeFlow() {
     const sessions = store.list()
     if (sessions.length === 0) {
@@ -189,6 +247,7 @@ export function Shell() {
         signal: ac.signal,
         resume,
         mode,
+        skills: activeSkills,
         askPermission: (req) =>
           new Promise<boolean>((resolve) => {
             setOverlay({
@@ -228,6 +287,7 @@ export function Shell() {
     else if (cmd === "quit" || cmd === "exit") exit()
     else if (cmd === "key") startKeyFlow()
     else if (cmd === "model") startModelFlow()
+    else if (cmd === "skill") handleSkillCommand(parseSlashArgs(raw))
     else if (cmd === "resume") startResumeFlow()
     else if (cmd === "plan") {
       setMode("plan")
@@ -239,6 +299,7 @@ export function Shell() {
       setSessionId(String(randomUUID()))
       setMessages([])
       setCreated(false)
+      setActiveSkills([])
       setLog([])
       setView(initialTUIState(loadConfig().model || "?"))
     } else pushLog(`unknown command: /${cmd} — type / for options`)
@@ -302,6 +363,7 @@ export function Shell() {
   const model = loadConfig().model || "?"
   const pct = view.status.limit ? `${(view.status.pct * 100).toFixed(0)}%` : "0%"
   const transcript = formatTranscript(messages)
+  const skillLabel = activeSkills.length ? ` · skills ${activeSkills.map((s) => s.name).join("+")}` : ""
 
   return (
     <Box flexDirection="column">
@@ -383,7 +445,7 @@ export function Shell() {
 
       <Box marginTop={1}>
         <Text dimColor>
-          session {sessionId.slice(0, 8)} · {mode} · {model} · ctx {view.status.used}/{view.status.limit} ({pct}) · steps{" "}
+          session {sessionId.slice(0, 8)} · {mode} · {model}{skillLabel} · ctx {view.status.used}/{view.status.limit} ({pct}) · steps{" "}
           {view.status.steps}
           {!hasResolvableKey() ? " · not connected" : ""}
         </Text>

@@ -3,6 +3,7 @@ import type { Runtime } from "../cli/launch"
 import { runTurn } from "../cli/launch"
 import type { AgentMode } from "../engine/mode"
 import type { Message } from "../engine/types"
+import type { Skill } from "../skills"
 import { App } from "./app"
 import { Shell } from "./shell"
 
@@ -19,6 +20,7 @@ export interface TUIRunOptions {
   autoApprove?: boolean
   resume?: boolean
   mode?: AgentMode
+  skills?: Skill[]
   compactThreshold?: number
   onDone?: (code: number) => void
 }
@@ -47,6 +49,7 @@ export function runTUI(opts: TUIRunOptions): void {
           autoApprove: opts.autoApprove,
           resume: opts.resume,
           mode: opts.mode,
+          skills: opts.skills,
           compactThreshold: opts.compactThreshold,
           askPermission: ask,
         })) {

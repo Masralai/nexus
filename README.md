@@ -1,18 +1,28 @@
 # Nexus
 
-BYOK coding agent 
+BYOK coding agent for the terminal — interactive chat shell, one-shot runs, and resumable sessions. Bring your own API key; Nexus talks OpenAI-compatible APIs and Anthropic.
 
-## Install / run
+## Features
+
+- **Interactive shell** — persistent chat with slash commands, streaming output, and permission prompts
+- **Bring your own key** — credentials in `~/.nexus/credentials.json` (env vars win)
+- **Plan / build modes** — read-only exploration vs full tool access
+- **Skills** — activate instruction packs from `~/.agents/skills` (same layout as Cursor / Claude Code)
+- **Sessions** — JSONL history under `~/.nexus/sessions/` with resume
+- **Tools** — `read`, `write`, `edit`, `bash`, `glob`, `grep`
+
+## Quick start
 
 ```bash
 bun install
-
-# Interactive shell (OpenCode-style). First launch opens /key if no credentials.
 bun run src/cli/main.ts
-# or: ./dist/nexus
+```
 
-# One-shot / scripted
-export OPENAI_API_KEY=…   # optional if you already ran /key
+On first launch, `/key` walks you through provider + API key. Then type a task normally.
+
+```bash
+# One-shot (non-interactive)
+export OPENAI_API_KEY=…
 bun run src/cli/main.ts run "list files in this repo" --yes
 
 # Compiled binary
@@ -20,29 +30,44 @@ bun run build:compile
 ./dist/nexus
 ```
 
-## Commands
+> [!NOTE]
+> Env API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …) override the credentials file.
+
+## Usage
 
 ```
-nexus                         # persistent chat shell
+nexus                         # interactive shell
 nexus run "task" [--model <m>] [--yes]
 nexus resume <id> [--model <m>] [--yes]
 nexus self-test [--model <m>]
 ```
 
+| Exit code (`run`) | Meaning |
+|---|---|
+| `0` | done |
+| `1` | error |
+| `2` | aborted (Ctrl+C) |
+
 ### Shell slash commands
 
 | Command | Action |
 |---|---|
-| `/key` | Provider picker → paste API key → `~/.nexus/credentials.json` |
-| `/model` | Suggested models + Custom… |
-| `/resume` | Pick a past session |
-| `/new` | Fresh session |
+| `/key` | Connect provider + API key |
+| `/model` | Pick or enter a model id |
+| `/skill` | Activate a skill (picker); `/skill <name>` · `/skill clear` |
+| `/plan` | Read-only agent mode |
+| `/build` | Full tools mode |
+| `/resume` | Continue a past session |
+| `/new` | Fresh session (clears active skills) |
 | `/help` | List commands |
 | `/quit` | Exit |
 
-Ctrl+C aborts the current agent turn; Ctrl+C on an idle prompt quits.
+Ctrl+C aborts the current turn; Ctrl+C on an idle prompt quits.
 
-Exit codes (for `run`): `0` done · `1` error · `2` aborted.
+## Development
 
-Config: `~/.nexus.json`. Credentials: `~/.nexus/credentials.json` (`0600`). Env API keys win over the file. Sessions: `~/.nexus/sessions/`.
-
+```bash
+bun test
+bun run typecheck
+bun run build:compile
+```
