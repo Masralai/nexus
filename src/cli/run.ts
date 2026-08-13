@@ -1,12 +1,9 @@
 import { randomUUID } from "node:crypto"
-import { run } from "../engine/loop"
 import { JSONLStore } from "../engine/state"
 import type { Message, Tool } from "../engine/types"
-import { createProvider } from "../providers"
 import type { Provider } from "../providers/types"
-import { defaultTools } from "../tools"
 import { runTUI } from "../tui"
-import { defaultCompactModel, loadConfig, resolveApiKey } from "./config"
+import { launchRuntime, runTurn } from "./launch"
 
 export function parseFlags(argv: string[]): { yes: boolean; model?: string; rest: string[] } {
   const yes = argv.includes("--yes")
@@ -16,57 +13,44 @@ export function parseFlags(argv: string[]): { yes: boolean; model?: string; rest
   return { yes, model, rest }
 }
 
-export function makeProvider(model?: string): { provider: Provider; cfg: ReturnType<typeof loadConfig>; compactProvider: Provider } {
-  const cfg = loadConfig({ model })
-  const apiKey = resolveApiKey(cfg)
-  const common = {
-    provider: cfg.provider,
-    apiKey,
-    baseUrl: cfg.baseUrl ?? process.env.OPENAI_BASE_URL,
-  }
-  return {
-    cfg,
-    provider: createProvider({ ...common, model: cfg.model }),
-    compactProvider: createProvider({
-      ...common,
-      model: cfg.compactModel || defaultCompactModel(cfg.provider),
-    }),
-  }
+/** @deprecated Prefer launchRuntime — kept for self-test and callers. */
+export function makeProvider(model?: string): {
+  provider: Provider
+  cfg: ReturnType<typeof launchRuntime>["cfg"]
+  compactProvider: Provider
+} {
+  const rt = launchRuntime({ model })
+  return { provider: rt.provider, cfg: rt.cfg, compactProvider: rt.compactProvider }
 }
 
 export async function consumeHeadless(
   messages: Message[],
   opts: {
-    provider: Provider
-    registry: Map<string, Tool>
+    runtime: ReturnType<typeof launchRuntime>
     cwd: string
     model: string
     maxSteps: number
-    store: JSONLStore
     sessionId: string
     signal: AbortSignal
     autoApprove: boolean
     resume?: boolean
-    compactProvider?: Provider
-    compactThreshold?: number
+    mode?: "plan" | "build"
     write?: (s: string) => void
   },
 ): Promise<number> {
   const write = opts.write ?? ((s) => process.stdout.write(s))
   let code = 0
-  for await (const ev of run(messages, {
-    provider: opts.provider,
-    registry: opts.registry,
+  for await (const ev of runTurn({
+    messages,
+    runtime: opts.runtime,
     cwd: opts.cwd,
     model: opts.model,
     maxSteps: opts.maxSteps,
-    store: opts.store,
     sessionId: opts.sessionId,
     signal: opts.signal,
     autoApprove: opts.autoApprove,
     resume: opts.resume,
-    compactProvider: opts.compactProvider,
-    compactThreshold: opts.compactThreshold,
+    mode: opts.mode,
   })) {
     if (ev.type === "tokenDelta") write(ev.delta)
     else if (ev.type === "error") {
@@ -100,15 +84,14 @@ export interface SessionOpts {
   model?: string
   yes: boolean
   store?: JSONLStore
+  mode?: "plan" | "build"
 }
 
 export async function runSession(opts: SessionOpts): Promise<number> {
-  const { provider, cfg, compactProvider } = makeProvider(opts.model)
-  const store = opts.store ?? new JSONLStore()
+  const runtime = launchRuntime({ model: opts.model, store: opts.store })
   const sessionId = opts.sessionId ?? randomUUID()
   const cwd = opts.cwd ?? process.cwd()
-  const model = cfg.model || "(default)"
-  const registry = new Map(defaultTools().map((t) => [t.name, t]))
+  const model = runtime.cfg.model || "(default)"
   const messages = opts.messages ?? [{ role: "user" as const, content: opts.task ?? "" }]
   const ac = new AbortController()
   const onSig = () => ac.abort()
@@ -120,37 +103,32 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   try {
     if (headless) {
       return await consumeHeadless(messages, {
-        provider,
-        registry,
+        runtime,
         cwd,
         model,
-        maxSteps: cfg.maxSteps,
-        store,
+        maxSteps: runtime.cfg.maxSteps,
         sessionId,
         signal: ac.signal,
         autoApprove: opts.yes,
         resume: opts.resume,
-        compactProvider,
-        compactThreshold: cfg.compactThreshold,
+        mode: opts.mode,
       })
     }
     return await new Promise<number>((resolve) => {
       runTUI({
-        provider,
-        registry,
+        runtime,
         cwd,
         model,
-        maxSteps: cfg.maxSteps,
+        maxSteps: runtime.cfg.maxSteps,
         task: opts.task ?? messages.find((m) => m.role === "user")?.content ?? "",
         messages,
-        store,
         sessionId,
         signal: ac.signal,
         abort: () => ac.abort(),
         autoApprove: opts.yes,
         resume: opts.resume,
-        compactProvider,
-        compactThreshold: cfg.compactThreshold,
+        mode: opts.mode,
+        compactThreshold: runtime.cfg.compactThreshold,
         onDone: resolve,
       })
     })
@@ -158,3 +136,6 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     process.off("SIGINT", onSig)
   }
 }
+
+// re-export for tests that build registries
+export type { Tool }
