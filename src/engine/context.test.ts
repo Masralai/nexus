@@ -47,6 +47,17 @@ test("workingMemory includes chat guidance", () => {
   expect(workingMemory(msgs)).toContain("user declined")
 })
 
+test("workingMemory uses latest user message as task", () => {
+  const msgs: Message[] = [
+    { role: "user", content: "hello" },
+    { role: "assistant", content: "hi" },
+    { role: "user", content: "why" },
+  ]
+  const wm = workingMemory(msgs)
+  expect(wm).toContain("task: why")
+  expect(wm).not.toContain("task: hello")
+})
+
 test("workingMemory plan mode adds read-only line", () => {
   const msgs: Message[] = [{ role: "user", content: "design auth" }]
   expect(workingMemory(msgs, "plan")).toContain("Mode: plan")
