@@ -9,11 +9,24 @@ export function approxTokens(m: Message): number {
   return Math.ceil(text.length / 4)
 }
 
+const GUIDANCE = `You are Nexus, a coding assistant in a chat shell.
+Prefer a normal conversational reply in plain text.
+Do not use tools for greetings, chitchat, or questions you can answer without the repo.
+Use tools only when the user wants file, shell, or repository work.
+If a tool returns "permission denied", the user declined that tool — say that; do not invent OS/sandbox permission failures.`
+
 export function workingMemory(messages: Message[]): string {
-  const task = messages.find((m) => m.role === "user")?.content ?? ""
+  // ponytail: latest user message is the active task (not the first forever)
+  const users = messages.filter((m) => m.role === "user")
+  const task = users.at(-1)?.content ?? ""
   const recent = messages
     .slice(-4)
     .map((m) => (m.role === "tool" ? `[${m.name}] ${m.result.output.slice(0, 120)}` : (m.content ?? "").slice(0, 120)))
     .join("\n")
-  return `[working-memory]\ntask: ${task.slice(0, 300)}\nrecent:\n${recent}`
+  return `[working-memory]
+${GUIDANCE}
+
+task: ${task.slice(0, 300)}
+recent:
+${recent}`
 }

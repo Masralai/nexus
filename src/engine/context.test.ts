@@ -41,3 +41,19 @@ test("workingMemory includes the task", () => {
   expect(workingMemory(msgs)).toContain("[working-memory]")
   expect(workingMemory(msgs)).toContain("task: fix the tests")
 })
+test("workingMemory includes chat guidance", () => {
+  const msgs: Message[] = [{ role: "user", content: "hi" }]
+  expect(workingMemory(msgs)).toContain("Prefer a normal conversational reply")
+  expect(workingMemory(msgs)).toContain("user declined")
+})
+
+test("workingMemory uses latest user message as task", () => {
+  const msgs: Message[] = [
+    { role: "user", content: "hello" },
+    { role: "assistant", content: "hi" },
+    { role: "user", content: "why" },
+  ]
+  const wm = workingMemory(msgs)
+  expect(wm).toContain("task: why")
+  expect(wm).not.toContain("task: hello")
+})
