@@ -4,6 +4,7 @@ import type { JSONLStore } from "../engine/state"
 import { run } from "../engine/loop"
 import type { Message, Tool } from "../engine/types"
 import { App } from "./app"
+import { Shell } from "./shell"
 
 export interface TUIRunOptions {
   provider: Provider
@@ -59,4 +60,8 @@ export function runTUI(opts: TUIRunOptions): void {
     />,
     { exitOnCtrlC: false },
   )
+}
+
+export function runShell(): void {
+  render(<Shell />, { exitOnCtrlC: false })
 }

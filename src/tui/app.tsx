@@ -3,6 +3,7 @@ import { useEffect, useState } from "react"
 import type { EngineEvent } from "../engine/types"
 import { initialTUIState, reduceEvent } from "./state"
 import type { PermissionRequest, TUIState } from "./state"
+import { Picker } from "./picker"
 
 export interface TUIOptions {
   model: string
@@ -44,11 +45,8 @@ export function App({ model, task, run, onDone, onCtrlC }: TUIOptions) {
       onCtrlC?.()
       return
     }
-    if (input === "y") resolver?.(true)
-    else if (input === "n") resolver?.(false)
-    else return
-    setResolver(null)
-    setState((s) => ({ ...s, permission: null }))
+    // permission handled by Picker when visible
+    if (state.permission) return
   })
 
   useEffect(() => {
@@ -64,10 +62,24 @@ export function App({ model, task, run, onDone, onCtrlC }: TUIOptions) {
         <Text key={i}>{l}</Text>
       ))}
       {state.assistantOutput ? <Text>{state.assistantOutput}</Text> : null}
-      {state.permission ? (
-        <Text bold color="yellow">
-          Allow {state.permission.name} {state.permission.reason}? [y/n]
-        </Text>
+      {state.permission && resolver ? (
+        <Picker
+          title={`Allow ${state.permission.name}? ${state.permission.reason}`}
+          items={[
+            { id: "yes", label: "Approve" },
+            { id: "no", label: "Deny" },
+          ]}
+          onSelect={(id) => {
+            resolver(id === "yes")
+            setResolver(null)
+            setState((s) => ({ ...s, permission: null }))
+          }}
+          onCancel={() => {
+            resolver(false)
+            setResolver(null)
+            setState((s) => ({ ...s, permission: null }))
+          }}
+        />
       ) : null}
       <Box marginTop={1}>
         <Text dimColor>
