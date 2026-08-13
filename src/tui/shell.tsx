@@ -198,6 +198,7 @@ export function Shell() {
     const registry = new Map(defaultTools().map((t) => [t.name, t]))
     const resume = created
     if (!created) setCreated(true)
+    const planRules = mode === "plan" ? { denyTools: ["write", "edit", "bash"] } : undefined
 
     try {
       for await (const ev of run(nextMsgs, {
@@ -211,7 +212,7 @@ export function Shell() {
         signal: ac.signal,
         resume,
         mode,
-        rules: mode === "plan" ? { denyTools: ["write", "edit", "bash"] } : undefined,
+        rules: planRules,
         compactProvider,
         compactThreshold: cfg.compactThreshold,
         askPermission: (req) =>
