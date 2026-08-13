@@ -9,9 +9,10 @@ export interface TUIOptions {
   task: string
   run: (emit: (ev: EngineEvent) => void, ask: (req: PermissionRequest) => Promise<boolean>) => Promise<void>
   onDone?: (code: number) => void
+  onCtrlC?: () => void
 }
 
-export function App({ model, task, run, onDone }: TUIOptions) {
+export function App({ model, task, run, onDone, onCtrlC }: TUIOptions) {
   const [state, setState] = useState<TUIState>(() => initialTUIState(model))
   const [resolver, setResolver] = useState<((v: boolean) => void) | null>(null)
 
@@ -35,7 +36,14 @@ export function App({ model, task, run, onDone }: TUIOptions) {
     }
   }, [run])
 
-  useInput((input) => {
+  useInput((input, key) => {
+    if (key.ctrl && input === "c") {
+      resolver?.(false)
+      setResolver(null)
+      setState((s) => ({ ...s, permission: null }))
+      onCtrlC?.()
+      return
+    }
     if (input === "y") resolver?.(true)
     else if (input === "n") resolver?.(false)
     else return
