@@ -1,4 +1,6 @@
 node_modules/
+CONTEXT.md
+AGENTS.md
 .nexus.json
 .nexus/
 dist/
