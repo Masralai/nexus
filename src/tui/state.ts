@@ -76,3 +76,14 @@ export function reduceEvent(s: TUIState, ev: EngineEvent): TUIState {
       return { ...s, done: true, aborted: true }
   }
 }
+
+/** Clear live-turn chrome after a turn ends; keep status / error / aborted. */
+export function settleTurnView(s: TUIState, ev: EngineEvent): TUIState {
+  return {
+    ...initialTUIState(s.status.model),
+    status: ev.type === "runComplete" ? { ...s.status, steps: ev.steps } : s.status,
+    error: ev.type === "error" ? ev.message : undefined,
+    aborted: ev.type === "aborted",
+    done: true,
+  }
+}

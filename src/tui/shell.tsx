@@ -3,23 +3,20 @@ import { Box, Text, useApp, useInput } from "ink"
 import { randomUUID } from "node:crypto"
 import {
   applyPresetToConfig,
-  defaultCompactModel,
   hasResolvableKey,
   loadConfig,
-  resolveApiKey,
   saveConfig,
 } from "../cli/config"
 import { setCredential } from "../cli/credentials"
-import { run } from "../engine/loop"
+import { launchRuntime, runTurn } from "../cli/launch"
 import { JSONLStore } from "../engine/state"
 import type { Message } from "../engine/types"
-import { createProvider } from "../providers"
+import type { AgentMode } from "../engine/mode"
 import { PRESETS, getPreset, otherPreset } from "../providers/presets"
-import { defaultTools } from "../tools"
 import { LineInput } from "./line-input"
 import { Picker } from "./picker"
 import { HELP, filterSlashCommands, parseSlash } from "./slash"
-import { reduceEvent, initialTUIState } from "./state"
+import { reduceEvent, initialTUIState, settleTurnView } from "./state"
 import type { TUIState } from "./state"
 import { formatTranscript } from "./transcript"
 
@@ -28,20 +25,6 @@ type Overlay =
   | { kind: "picker"; title: string; items: { id: string; label: string }[]; then: (id: string) => void }
   | { kind: "line"; label: string; mask?: boolean; then: (v: string) => void }
   | { kind: "permission"; title: string; resolve: (ok: boolean) => void }
-
-function buildProviders(model?: string) {
-  const cfg = loadConfig({ model })
-  const apiKey = resolveApiKey(cfg)
-  const common = { provider: cfg.provider, apiKey, baseUrl: cfg.baseUrl }
-  return {
-    cfg,
-    provider: createProvider({ ...common, model: cfg.model }),
-    compactProvider: createProvider({
-      ...common,
-      model: cfg.compactModel || defaultCompactModel(cfg.provider),
-    }),
-  }
-}
 
 export function Shell() {
   const { exit } = useApp()
@@ -55,7 +38,7 @@ export function Shell() {
   const [overlay, setOverlay] = useState<Overlay>(null)
   const [log, setLog] = useState<string[]>([])
   const [slashIdx, setSlashIdx] = useState(0)
-  const [mode, setMode] = useState<"plan" | "build">("build")
+  const [mode, setMode] = useState<AgentMode>("build")
   const acRef = useRef<AbortController | null>(null)
 
   const pushLog = (line: string) => setLog((l) => [...l, line])
@@ -109,7 +92,6 @@ export function Shell() {
           label: `API key (${preset.label}): `,
           mask: true,
           then: (apiKey) => {
-            // ollama often needs any non-empty key
             const key = apiKey || (preset.id === "ollama" ? "ollama" : apiKey)
             if (!key) {
               pushLog("key required")
@@ -182,7 +164,7 @@ export function Shell() {
     })
   }
 
-  async function runTurn(userText: string) {
+  async function runTurnUi(userText: string) {
     if (!hasResolvableKey()) {
       pushLog("not connected — run /key")
       startKeyFlow()
@@ -194,27 +176,19 @@ export function Shell() {
     setView(initialTUIState(loadConfig().model || "?"))
     const ac = new AbortController()
     acRef.current = ac
-    const { provider, cfg, compactProvider } = buildProviders()
-    const registry = new Map(defaultTools().map((t) => [t.name, t]))
+    const runtime = launchRuntime({ store })
     const resume = created
     if (!created) setCreated(true)
-    const planRules = mode === "plan" ? { denyTools: ["write", "edit", "bash"] } : undefined
 
     try {
-      for await (const ev of run(nextMsgs, {
-        provider,
-        registry,
+      for await (const ev of runTurn({
+        messages: nextMsgs,
+        runtime,
         cwd: process.cwd(),
-        model: cfg.model || "(default)",
-        maxSteps: cfg.maxSteps,
-        store,
         sessionId,
         signal: ac.signal,
         resume,
         mode,
-        rules: planRules,
-        compactProvider,
-        compactThreshold: cfg.compactThreshold,
         askPermission: (req) =>
           new Promise<boolean>((resolve) => {
             setOverlay({
@@ -234,14 +208,7 @@ export function Shell() {
           } catch {
             /* first create race */
           }
-          // fold live turn into transcript; keep status / error flags
-          setView((s) => ({
-            ...initialTUIState(s.status.model),
-            status: ev.type === "runComplete" ? { ...s.status, steps: ev.steps } : s.status,
-            error: ev.type === "error" ? ev.message : undefined,
-            aborted: ev.type === "aborted",
-            done: true,
-          }))
+          setView((s) => settleTurnView(s, ev))
         }
       }
     } finally {
@@ -288,7 +255,6 @@ export function Shell() {
     }
     if (busy) return
 
-    // slash command menu navigation
     if (slashOpen && slashMatches.length > 0) {
       if (key.upArrow) {
         setSlashIdx((i) => (i - 1 + slashMatches.length) % slashMatches.length)
@@ -318,7 +284,7 @@ export function Shell() {
       setSlashIdx(0)
       if (!line) return
       if (line.startsWith("/")) handleSlash(line)
-      else void runTurn(line)
+      else void runTurnUi(line)
       return
     }
     if (key.backspace || key.delete) {
@@ -342,7 +308,6 @@ export function Shell() {
       {transcript.slice(-80).map((l, i) => (
         <Text key={`t${i}`}>{l}</Text>
       ))}
-      {/* live turn only — when idle, history already lives in messages */}
       {busy ? (
         <>
           {view.lines.map((l, i) => (

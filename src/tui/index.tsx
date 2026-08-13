@@ -1,33 +1,30 @@
 import { render } from "ink"
-import type { Provider } from "../providers/types"
-import type { JSONLStore } from "../engine/state"
-import { run } from "../engine/loop"
-import type { Message, Tool } from "../engine/types"
+import type { Runtime } from "../cli/launch"
+import { runTurn } from "../cli/launch"
+import type { AgentMode } from "../engine/mode"
+import type { Message } from "../engine/types"
 import { App } from "./app"
 import { Shell } from "./shell"
 
 export interface TUIRunOptions {
-  provider: Provider
-  registry: Map<string, Tool>
+  runtime: Runtime
   cwd: string
   model: string
   maxSteps: number
   task: string
   messages?: Message[]
-  store?: JSONLStore
   sessionId?: string
   signal?: AbortSignal
   abort?: () => void
   autoApprove?: boolean
   resume?: boolean
-  compactProvider?: Provider
+  mode?: AgentMode
   compactThreshold?: number
   onDone?: (code: number) => void
 }
 
 export function runTUI(opts: TUIRunOptions): void {
   let instance: ReturnType<typeof render> | undefined
-  // ponytail: ink default exitOnCtrlC bypasses AbortController; we abort then exit via onDone
   instance = render(
     <App
       model={opts.model}
@@ -39,18 +36,17 @@ export function runTUI(opts: TUIRunOptions): void {
       }}
       run={async (emit, ask) => {
         const messages = opts.messages ?? [{ role: "user", content: opts.task }]
-        for await (const ev of run(messages, {
-          provider: opts.provider,
-          registry: opts.registry,
+        for await (const ev of runTurn({
+          messages,
+          runtime: opts.runtime,
           cwd: opts.cwd,
           model: opts.model,
           maxSteps: opts.maxSteps,
-          store: opts.store,
           sessionId: opts.sessionId,
           signal: opts.signal,
           autoApprove: opts.autoApprove,
           resume: opts.resume,
-          compactProvider: opts.compactProvider,
+          mode: opts.mode,
           compactThreshold: opts.compactThreshold,
           askPermission: ask,
         })) {
