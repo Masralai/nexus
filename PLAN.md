@@ -1,9 +1,9 @@
-# Harness — Detailed Plan
+# Nexus — Detailed Plan
 
-A **bring-your-own-API-key (BYOK) coding-agent harness** for AI agents. Model-agnostic
+A **bring-your-own-API-key (BYOK) coding agent**. Model-agnostic
 agent engine with a terminal UI, built for coding tasks. TypeScript on Bun.
 
-The north star: a solid harness like Claude Code / Codex / opencode, but the user brings
+The north star: a solid agent CLI like Claude Code / Codex / opencode, but the user brings
 their own API keys. Engine-first so the agent runtime is a reusable library that a CLI
 and a TUI both consume.
 
@@ -17,7 +17,7 @@ and a TUI both consume.
 - A model-agnostic agent runtime (agent loop) that falls out of the CLI as a reusable core.
 - Bring-your-own-key: support the dominant provider market with minimal adapter code.
 - A TUI visible early, plus a headless scriptable `run` mode.
-- A harness that survives interruption: sessions persist, resume works, CTRL-C is safe.
+- An agent that survives interruption: sessions persist, resume works, CTRL-C is safe.
 
 ### Non-Goals (v1)
 - No cloud account / hosted routing.
@@ -40,9 +40,9 @@ and a TUI both consume.
 | Loop | Native tool-calling; canonical internal `Message` / `ToolCall` / `ToolResult`; `maxSteps = 50`; "no tool_use = done" |
 | Context | Stage 1: structured working-memory + per-tool-result truncation. Stage 2 (v1.1): compaction via a cheap model |
 | Tools | Parallel read tools, sequential mutators; engine-owned permission layer; **ask on every Bash** |
-| State | JSONL at `~/.harness/sessions/<id>.jsonl`, incremental per-turn writes, resume = replay |
-| Config | Env-over-config `~/.harness.json`; single `provider` + `model`, `--model` CLI override |
-| Tests | Mock `Provider` as the backbone; recorded fixtures for adapter tests; real-key only via manual `harness self-test` |
+| State | JSONL at `~/.nexus/sessions/<id>.jsonl`, incremental per-turn writes, resume = replay |
+| Config | Env-over-config `~/.nexus.json`; single `provider` + `model`, `--model` CLI override |
+| Tests | Mock `Provider` as the backbone; recorded fixtures for adapter tests; real-key only via manual `nexus self-test` |
 | UI | TUI visible early (ink — React-based, native fit for Bun/TS); headless `run` stays scriptable |
 
 ---
@@ -63,7 +63,7 @@ test/              colocated unit tests, mock-driven loop tests
 
 The loop emits events through a small emitter. The headless CLI and the TUI are both
 subscribers. This is what lets the TUI be built and demoed against the mock provider
-before the engine is perfect, and keeps `harness run` scriptable (machine-readable,
+before the engine is perfect, and keeps `nexus run` scriptable (machine-readable,
 exit-code driven).
 
 **Engine events:**
@@ -164,7 +164,7 @@ configurable. Sandboxing (containers/seccomp) is explicitly **v2**.
 
 ## 6. State & Sessions
 
-- **Storage:** append-only JSONL per session at `~/.harness/sessions/<id>.jsonl`.
+- **Storage:** append-only JSONL per session at `~/.nexus/sessions/<id>.jsonl`.
 - **Contents per line:** canonical `Message[]` entries + `sessionId`, `cwd`, `model`,
   `provider`, `createdAt`, `status`.
 - **Writes:** incremental — written after every turn, so a crash/CTRL-C interrupts at the
@@ -177,14 +177,14 @@ configurable. Sandboxing (containers/seccomp) is explicitly **v2**.
 
 ## 7. Config & Keys
 
-- **`~/.harness.json`** holds: `provider`, `model`, `maxSteps`, permission rules, cwd
+- **`~/.nexus.json`** holds: `provider`, `model`, `maxSteps`, permission rules, cwd
   defaults, and optionally API keys.
 - **Env vars override config** and are the recommended key home: `ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, plus `OPENAI_BASE_URL` for custom endpoints (Ollama/OpenRouter/etc.).
 - **Single model selection:** `provider` + `model` in config, overridden by
   `--model` on the CLI. No auto-router.
-- `harness init` (interactive key/config setup) is v1.1+ sugar. No keyring in v1.
-
+- `harness init` (interactive key/config setup) is replaced by the shell `/key` flow.
+  Credentials live in `~/.nexus/credentials.json` (`0600`); env API keys still win.
 ---
 
 ## 8. Testing Strategy
@@ -200,7 +200,7 @@ configurable. Sandboxing (containers/seccomp) is explicitly **v2**.
   - CTRL-C / interrupted-run resume
 - **Recorded fixtures** for adapter-level tests of the two real providers' streaming
   shapes (added once real adapters land).
-- **Real-key integration** only via a manual `harness self-test` command, never in CI.
+- **Real-key integration** only via a manual `nexus self-test` command, never in CI.
 - Repo layout keeps tests colocated per module.
 
 ---
@@ -208,11 +208,11 @@ configurable. Sandboxing (containers/seccomp) is explicitly **v2**.
 ## 9. CLI Surface
 
 ```
-harness run "task"          # run the loop against configured provider; streams to stdout
-harness run --model <m>     # override model
-harness run --yes           # auto-approve permissions (headless)
-harness resume <id>         # resume a session from its JSONL
-harness self-test           # manual real-key smoke test
+nexus run "task"          # run the loop against configured provider; streams to stdout
+nexus run --model <m>     # override model
+nexus run --yes           # auto-approve permissions (headless)
+nexus resume <id>         # resume a session from its JSONL
+nexus self-test           # manual real-key smoke test
 ```
 
 **Exit codes:** `0` done · `1` error · `2` user-aborted. Session survives CTRL-C.
@@ -232,7 +232,7 @@ harness self-test           # manual real-key smoke test
 ## 11. Milestones
 
 **M0 — Scaffold**
-- Bun project, tsconfig, CLI entry, config loader (`~/.harness.json`, env override),
+- Bun project, tsconfig, CLI entry, config loader (`~/.nexus.json`, env override),
   `--model` plumbing, `AGENTS.md`-style dev conventions.
 
 **M1 — Engine core (mock-first)**
@@ -251,13 +251,15 @@ harness self-test           # manual real-key smoke test
 **M4 — TUI**
 - ink app: transcript, tool activity, permission prompt, context/status bar. Demoable
   against mock *and* real keys.
+- **Persistent shell** (`nexus` no args): multi-turn chat, slash commands `/key` `/model`
+  `/resume` `/new` `/help` `/quit`; credentials in `~/.nexus/credentials.json`.
 
 **M5 — CLI surface**
-- `harness run`, `harness resume <id>`, `harness self-test`, exit codes (0/1/2),
+- `nexus run`, `nexus resume <id>`, `nexus self-test`, exit codes (0/1/2),
   CTRL-C → session survives.
 
 **v1.1+**
-- Compaction (cheap-model), `harness init`, installers (compile / bunx), recorded
+- Compaction (cheap-model), shell `/key` credentials, installers (compile / bunx), recorded
   fixtures + CI. Spec: [specs/v1.1.md](specs/v1.1.md).
 - Sandboxing (containers/seccomp) is **v2** — see §12 (not v1.1).
 
