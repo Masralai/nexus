@@ -18,6 +18,7 @@ import { PRESETS, getPreset, otherPreset } from "../providers/presets"
 import { defaultTools } from "../tools"
 import { LineInput } from "./line-input"
 import { Picker } from "./picker"
+import { HELP, filterSlashCommands, parseSlash } from "./slash"
 import { reduceEvent, initialTUIState } from "./state"
 import type { TUIState } from "./state"
 
@@ -26,13 +27,6 @@ type Overlay =
   | { kind: "picker"; title: string; items: { id: string; label: string }[]; then: (id: string) => void }
   | { kind: "line"; label: string; mask?: boolean; then: (v: string) => void }
   | { kind: "permission"; title: string; resolve: (ok: boolean) => void }
-
-const HELP = `/key     connect provider + API key
-/model   set model
-/resume  continue a past session
-/new     start a fresh session
-/help    this list
-/quit    exit`
 
 function buildProviders(model?: string) {
   const cfg = loadConfig({ model })
@@ -58,12 +52,15 @@ export function Shell() {
   const [busy, setBusy] = useState(false)
   const [view, setView] = useState<TUIState>(() => initialTUIState(loadConfig().model || "?"))
   const [overlay, setOverlay] = useState<Overlay>(null)
-  const [log, setLog] = useState<string[]>(["nexus shell — type a message or /help"])
+  const [log, setLog] = useState<string[]>([])
+  const [slashIdx, setSlashIdx] = useState(0)
   const acRef = useRef<AbortController | null>(null)
 
   const pushLog = (line: string) => setLog((l) => [...l, line])
 
   const needKey = !hasResolvableKey()
+  const slashMatches = filterSlashCommands(input)
+  const slashOpen = !overlay && !busy && input.startsWith("/")
 
   useEffect(() => {
     if (needKey) startKeyFlow()
@@ -248,7 +245,7 @@ export function Shell() {
   }
 
   function handleSlash(raw: string) {
-    const cmd = raw.slice(1).trim().split(/\s+/)[0]?.toLowerCase() ?? ""
+    const cmd = parseSlash(raw)
     if (cmd === "help") pushLog(HELP)
     else if (cmd === "quit" || cmd === "exit") exit()
     else if (cmd === "key") startKeyFlow()
@@ -260,7 +257,7 @@ export function Shell() {
       setCreated(false)
       setView(initialTUIState(loadConfig().model || "?"))
       pushLog("new session")
-    } else pushLog(`unknown command: /${cmd} — try /help`)
+    } else pushLog(`unknown command: /${cmd} — type / for options`)
   }
 
   useInput((ch, key) => {
@@ -273,9 +270,35 @@ export function Shell() {
       return
     }
     if (busy) return
+
+    // slash command menu navigation
+    if (slashOpen && slashMatches.length > 0) {
+      if (key.upArrow) {
+        setSlashIdx((i) => (i - 1 + slashMatches.length) % slashMatches.length)
+        return
+      }
+      if (key.downArrow) {
+        setSlashIdx((i) => (i + 1) % slashMatches.length)
+        return
+      }
+      if (key.escape) {
+        setInput("")
+        setSlashIdx(0)
+        return
+      }
+      if (key.return) {
+        const pick = slashMatches[slashIdx] ?? slashMatches[0]
+        setInput("")
+        setSlashIdx(0)
+        if (pick) handleSlash(`/${pick.id}`)
+        return
+      }
+    }
+
     if (key.return) {
       const line = input.trim()
       setInput("")
+      setSlashIdx(0)
       if (!line) return
       if (line.startsWith("/")) handleSlash(line)
       else void runTurn(line)
@@ -283,10 +306,14 @@ export function Shell() {
     }
     if (key.backspace || key.delete) {
       setInput((v) => v.slice(0, -1))
+      setSlashIdx(0)
       return
     }
     if (key.ctrl || key.meta || key.upArrow || key.downArrow) return
-    if (ch) setInput((v) => v + ch)
+    if (ch) {
+      setInput((v) => v + ch)
+      setSlashIdx(0)
+    }
   })
 
   const model = loadConfig().model || "?"
@@ -330,9 +357,34 @@ export function Shell() {
             onCancel={() => overlay.resolve(false)}
           />
         ) : (
-          <Text>
-            {busy ? <Text dimColor>… running (Ctrl+C abort)</Text> : <Text>{"> "}{input}<Text dimColor>█</Text></Text>}
-          </Text>
+          <Box flexDirection="column">
+            <Text>
+              {busy ? (
+                <Text dimColor>… running (Ctrl+C abort)</Text>
+              ) : (
+                <Text>
+                  {"> "}
+                  {input}
+                  <Text dimColor>█</Text>
+                </Text>
+              )}
+            </Text>
+            {slashOpen ? (
+              <Box flexDirection="column" marginTop={1}>
+                {slashMatches.length === 0 ? (
+                  <Text dimColor>no matching commands</Text>
+                ) : (
+                  slashMatches.map((c, i) => (
+                    <Text key={c.id} color={i === slashIdx ? "cyan" : undefined}>
+                      {i === slashIdx ? "❯ " : "  "}/{c.id}
+                      <Text dimColor>  {c.hint}</Text>
+                    </Text>
+                  ))
+                )}
+                <Text dimColor>↑↓ select · Enter run · Esc clear</Text>
+              </Box>
+            ) : null}
+          </Box>
         )}
       </Box>
 
