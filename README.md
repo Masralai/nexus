@@ -1,6 +1,6 @@
 # Nexus
 
-BYOK coding agent — TypeScript on Bun. Bring your own API keys.
+BYOK coding agent 
 
 ## Install / run
 
@@ -46,8 +46,3 @@ Exit codes (for `run`): `0` done · `1` error · `2` aborted.
 
 Config: `~/.nexus.json`. Credentials: `~/.nexus/credentials.json` (`0600`). Env API keys win over the file. Sessions: `~/.nexus/sessions/`.
 
-## Docs
-
-- [PLAN.md](PLAN.md) — architecture and milestones
-- [PRD.md](PRD.md) — user stories
-- [specs/v1.1.md](specs/v1.1.md) — v1.1 SDD
