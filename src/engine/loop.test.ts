@@ -177,15 +177,17 @@ test("resume appends without duplicating meta", async () => {
   const store = new JSONLStore(dir)
   const messages: Message[] = [{ role: "user", content: "go" }]
   await collect(run(messages, cfg({ provider: new MockProvider([{ content: "hi" }]), store, sessionId: "s1" })))
+  messages.push({ role: "user", content: "again" })
   await collect(
-    run(messages, cfg({ provider: new MockProvider([{ content: "again" }]), store, sessionId: "s1", resume: true })),
+    run(messages, cfg({ provider: new MockProvider([{ content: "ok" }]), store, sessionId: "s1", resume: true })),
   )
   const metas = readFileSync(store.path("s1"), "utf8")
     .split("\n")
     .filter((l) => l.includes('"type":"meta"'))
   expect(metas).toHaveLength(1)
   expect(store.load("s1").status).toBe("done")
-  expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "assistant"])
+  expect(store.load("s1").messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"])
+  expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"])
 })
 test("compacts when over threshold then continues", async () => {
   const messages: Message[] = Array.from({ length: 10 }, (_, i) => ({

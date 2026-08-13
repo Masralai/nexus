@@ -22,6 +22,7 @@ export interface RunConfig {
   compactProvider?: Provider
   compactThreshold?: number
   keepRecent?: number
+  mode?: "plan" | "build"
   askPermission?: (req: { id: string; name: string; input: unknown; reason: string }) => Promise<boolean>
 }
 
@@ -34,9 +35,13 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
   const threshold = cfg.compactThreshold ?? 0.8
   const keepRecent = cfg.keepRecent ?? 6
 
-  // ponytail: resume skips create so meta isn't duplicated
+  // ponytail: resume skips create so meta isn't duplicated;
+  // append any new leading msgs (usually the latest user turn) so JSONL stays complete
   if (store && !cfg.resume) {
     store.create({ id: sessionId, cwd, model, provider: provider.id, createdAt: new Date().toISOString() }, messages)
+  } else if (store && cfg.resume) {
+    const persisted = store.load(sessionId).messages
+    for (const m of messages.slice(persisted.length)) store.append(sessionId, m)
   }
 
   let steps = 0
@@ -65,7 +70,7 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
 
       const toolDefs = [...registry.values()].map((t) => ({ name: t.name, description: t.description, schema: t.schema }))
       const prompt = [
-        { role: "user" as const, content: workingMemory(messages) },
+        { role: "user" as const, content: workingMemory(messages, cfg.mode ?? "build") },
         ...messages.map((m) => (m.role === "tool" ? { ...m, result: { ...m.result, output: truncate(m.result.output) } } : m)),
       ]
       const stream = provider.stream(prompt, toolDefs, { signal: cfg.signal })

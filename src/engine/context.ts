@@ -15,7 +15,7 @@ Do not use tools for greetings, chitchat, or questions you can answer without th
 Use tools only when the user wants file, shell, or repository work.
 If a tool returns "permission denied", the user declined that tool — say that; do not invent OS/sandbox permission failures.`
 
-export function workingMemory(messages: Message[]): string {
+export function workingMemory(messages: Message[], mode: "plan" | "build" = "build"): string {
   // ponytail: latest user message is the active task (not the first forever)
   const users = messages.filter((m) => m.role === "user")
   const task = users.at(-1)?.content ?? ""
@@ -23,8 +23,13 @@ export function workingMemory(messages: Message[]): string {
     .slice(-4)
     .map((m) => (m.role === "tool" ? `[${m.name}] ${m.result.output.slice(0, 120)}` : (m.content ?? "").slice(0, 120)))
     .join("\n")
+  // ponytail: plan = one extra line; build keeps default GUIDANCE only
+  const modeLine =
+    mode === "plan"
+      ? "\nMode: plan — explore and propose a plan; do not implement or mutate files."
+      : ""
   return `[working-memory]
-${GUIDANCE}
+${GUIDANCE}${modeLine}
 
 task: ${task.slice(0, 300)}
 recent:

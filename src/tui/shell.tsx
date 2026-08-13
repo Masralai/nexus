@@ -21,6 +21,7 @@ import { Picker } from "./picker"
 import { HELP, filterSlashCommands, parseSlash } from "./slash"
 import { reduceEvent, initialTUIState } from "./state"
 import type { TUIState } from "./state"
+import { formatTranscript } from "./transcript"
 
 type Overlay =
   | null
@@ -54,6 +55,7 @@ export function Shell() {
   const [overlay, setOverlay] = useState<Overlay>(null)
   const [log, setLog] = useState<string[]>([])
   const [slashIdx, setSlashIdx] = useState(0)
+  const [mode, setMode] = useState<"plan" | "build">("build")
   const acRef = useRef<AbortController | null>(null)
 
   const pushLog = (line: string) => setLog((l) => [...l, line])
@@ -174,7 +176,7 @@ export function Shell() {
         setMessages(loaded.messages)
         setCreated(true)
         setOverlay(null)
-        pushLog(`resumed ${id}`)
+        setLog([])
         setView(initialTUIState(loaded.meta.model))
       },
     })
@@ -188,7 +190,6 @@ export function Shell() {
     }
     const nextMsgs = [...messages, { role: "user" as const, content: userText }]
     setMessages(nextMsgs)
-    pushLog(`you: ${userText}`)
     setBusy(true)
     setView(initialTUIState(loadConfig().model || "?"))
     const ac = new AbortController()
@@ -209,6 +210,8 @@ export function Shell() {
         sessionId,
         signal: ac.signal,
         resume,
+        mode,
+        rules: mode === "plan" ? { denyTools: ["write", "edit", "bash"] } : undefined,
         compactProvider,
         compactThreshold: cfg.compactThreshold,
         askPermission: (req) =>
@@ -225,12 +228,19 @@ export function Shell() {
       })) {
         setView((s) => reduceEvent(s, ev))
         if (ev.type === "runComplete" || ev.type === "aborted" || ev.type === "error") {
-          // keep messages array in sync from store
           try {
             setMessages(store.load(sessionId).messages)
           } catch {
             /* first create race */
           }
+          // fold live turn into transcript; keep status / error flags
+          setView((s) => ({
+            ...initialTUIState(s.status.model),
+            status: ev.type === "runComplete" ? { ...s.status, steps: ev.steps } : s.status,
+            error: ev.type === "error" ? ev.message : undefined,
+            aborted: ev.type === "aborted",
+            done: true,
+          }))
         }
       }
     } finally {
@@ -251,12 +261,18 @@ export function Shell() {
     else if (cmd === "key") startKeyFlow()
     else if (cmd === "model") startModelFlow()
     else if (cmd === "resume") startResumeFlow()
-    else if (cmd === "new") {
+    else if (cmd === "plan") {
+      setMode("plan")
+      pushLog("mode: plan (read-only)")
+    } else if (cmd === "build") {
+      setMode("build")
+      pushLog("mode: build")
+    } else if (cmd === "new") {
       setSessionId(String(randomUUID()))
       setMessages([])
       setCreated(false)
+      setLog([])
       setView(initialTUIState(loadConfig().model || "?"))
-      pushLog("new session")
     } else pushLog(`unknown command: /${cmd} — type / for options`)
   }
 
@@ -318,16 +334,27 @@ export function Shell() {
 
   const model = loadConfig().model || "?"
   const pct = view.status.limit ? `${(view.status.pct * 100).toFixed(0)}%` : "0%"
+  const transcript = formatTranscript(messages)
 
   return (
     <Box flexDirection="column">
-      {log.slice(-30).map((l, i) => (
-        <Text key={`l${i}`}>{l}</Text>
+      {transcript.slice(-80).map((l, i) => (
+        <Text key={`t${i}`}>{l}</Text>
       ))}
-      {view.lines.map((l, i) => (
-        <Text key={`v${i}`}>{l}</Text>
+      {/* live turn only — when idle, history already lives in messages */}
+      {busy ? (
+        <>
+          {view.lines.map((l, i) => (
+            <Text key={`v${i}`}>{l}</Text>
+          ))}
+          {view.assistantOutput ? <Text>{view.assistantOutput}</Text> : null}
+        </>
+      ) : null}
+      {log.slice(-20).map((l, i) => (
+        <Text key={`l${i}`} dimColor>
+          {l}
+        </Text>
       ))}
-      {view.assistantOutput ? <Text>{view.assistantOutput}</Text> : null}
       {view.error ? <Text color="red">error: {view.error}</Text> : null}
       {view.aborted ? <Text color="yellow">aborted</Text> : null}
 
@@ -390,7 +417,7 @@ export function Shell() {
 
       <Box marginTop={1}>
         <Text dimColor>
-          session {sessionId.slice(0, 8)} · {model} · ctx {view.status.used}/{view.status.limit} ({pct}) · steps{" "}
+          session {sessionId.slice(0, 8)} · {mode} · {model} · ctx {view.status.used}/{view.status.limit} ({pct}) · steps{" "}
           {view.status.steps}
           {!hasResolvableKey() ? " · not connected" : ""}
         </Text>
