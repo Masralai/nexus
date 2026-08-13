@@ -71,3 +71,21 @@ test("decide: plan denyTools blocks write/edit/bash", () => {
   expect(decide(rules, "bash", "ls")).toBe("deny")
   expect(decide(rules, "read", "x")).toBe("allow")
 })
+
+test("assemblePrompt prepends working memory and truncates tool output", async () => {
+  const { assemblePrompt } = await import("./context")
+  const msgs: Message[] = [
+    { role: "user", content: "task" },
+    {
+      role: "tool",
+      toolCallId: "c",
+      name: "read",
+      result: { ok: true, output: "x".repeat(5000) },
+    },
+  ]
+  const prompt = assemblePrompt(msgs, "build")
+  expect(prompt[0]).toEqual({ role: "user", content: expect.stringContaining("task: task") })
+  const tool = prompt[2] as Extract<Message, { role: "tool" }>
+  expect(tool.result.output).toContain("[...truncated")
+  expect(msgs[1].role === "tool" && msgs[1].result.output.length).toBe(5000)
+})

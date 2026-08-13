@@ -23,13 +23,14 @@ export interface ToolDefinition {
 
 export interface ToolContext {
   cwd: string
-  requirePermission(reason: string): Promise<boolean>
 }
 
 export interface Tool {
   name: string
   description: string
   schema: unknown
+  /** When true, safe to run in parallel and allowed in plan agent mode. */
+  readonly?: boolean
   execute(input: unknown, ctx: ToolContext): Promise<ToolResult>
 }
 

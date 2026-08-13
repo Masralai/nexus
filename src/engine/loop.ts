@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto"
 import type { Provider } from "../providers/types"
-import { READ_TOOLS } from "../tools"
-import { compactMessages, shouldCompact } from "./compact"
-import { approxTokens, truncate, workingMemory } from "./context"
-import { decide, type PermissionRules } from "./permission"
+import { assemblePrompt, budgetPct, budgetUsed, maybeCompact } from "./context"
+import { advertiseTools, modePolicy, isReadonlyTool, type AgentMode } from "./mode"
+import { gateToolCall, reasonForCall, type PermissionRules } from "./permission"
 import type { JSONLStore } from "./state"
 import type { EngineEvent, Message, Tool, ToolCall, ToolContext, ToolResult } from "./types"
 
@@ -16,27 +15,38 @@ export interface RunConfig {
   store?: JSONLStore
   sessionId?: string
   signal?: AbortSignal
+  /** Extra rules merged on top of agent-mode policy. */
   rules?: PermissionRules
   autoApprove?: boolean
   resume?: boolean
   compactProvider?: Provider
   compactThreshold?: number
   keepRecent?: number
-  mode?: "plan" | "build"
+  mode?: AgentMode
   askPermission?: (req: { id: string; name: string; input: unknown; reason: string }) => Promise<boolean>
+}
+
+function mergeRules(base: PermissionRules, extra?: PermissionRules): PermissionRules {
+  if (!extra) return base
+  return {
+    allowTools: [...(base.allowTools ?? []), ...(extra.allowTools ?? [])],
+    denyTools: [...(base.denyTools ?? []), ...(extra.denyTools ?? [])],
+    askTools: [...(base.askTools ?? []), ...(extra.askTools ?? [])],
+    denyPatterns: [...(base.denyPatterns ?? []), ...(extra.denyPatterns ?? [])],
+  }
 }
 
 export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<EngineEvent> {
   const { provider, registry, cwd, model, maxSteps } = cfg
-  const rules = cfg.rules ?? {}
+  const mode = cfg.mode ?? "build"
+  const policy = modePolicy(mode)
+  const rules = mergeRules(policy.rules, cfg.rules)
   const store = cfg.store
   const sessionId = cfg.sessionId ?? randomUUID()
   const limit = provider.contextWindow
   const threshold = cfg.compactThreshold ?? 0.8
   const keepRecent = cfg.keepRecent ?? 6
 
-  // ponytail: resume skips create so meta isn't duplicated;
-  // append any new leading msgs (usually the latest user turn) so JSONL stays complete
   if (store && !cfg.resume) {
     store.create({ id: sessionId, cwd, model, provider: provider.id, createdAt: new Date().toISOString() }, messages)
   } else if (store && cfg.resume) {
@@ -56,25 +66,22 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
       }
       if (steps >= maxSteps) break
 
-      // ponytail: compact in-memory only; JSONL keeps full history
-      if (cfg.compactProvider && shouldCompact(pct(), threshold)) {
+      if (cfg.compactProvider) {
         try {
-          const next = await compactMessages(messages, cfg.compactProvider, keepRecent)
-          messages.length = 0
-          messages.push(...next)
-          yield { type: "contextUpdate", used: budget(), limit, pct: pct() }
+          const did = await maybeCompact(messages, {
+            provider: cfg.compactProvider,
+            threshold,
+            keepRecent,
+            limit,
+          })
+          if (did) yield { type: "contextUpdate", used: budgetUsed(messages), limit, pct: budgetPct(messages, limit) }
         } catch {
           // skip compaction; continue with truncation-only
         }
       }
 
-      const allDefs = [...registry.values()].map((t) => ({ name: t.name, description: t.description, schema: t.schema }))
-      // ponytail: plan hides mutators from the model; denyTools remains a backstop
-      const toolDefs = cfg.mode === "plan" ? allDefs.filter((t) => READ_TOOLS.has(t.name)) : allDefs
-      const prompt = [
-        { role: "user" as const, content: workingMemory(messages, cfg.mode ?? "build") },
-        ...messages.map((m) => (m.role === "tool" ? { ...m, result: { ...m.result, output: truncate(m.result.output) } } : m)),
-      ]
+      const toolDefs = advertiseTools(registry, mode)
+      const prompt = assemblePrompt(messages, mode)
       const stream = provider.stream(prompt, toolDefs, { signal: cfg.signal })
 
       let content: string | null = null
@@ -92,24 +99,25 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
 
       if (calls.length === 0) {
         result = content ?? ""
-        yield { type: "contextUpdate", used: budget(), limit, pct: pct() }
+        yield { type: "contextUpdate", used: budgetUsed(messages), limit, pct: budgetPct(messages, limit) }
         yield { type: "turnComplete", step: steps }
         break
       }
 
       const grants = new Map<string, boolean>()
       for (const call of calls) {
-        const reason = JSON.stringify(call.input)
-        const d = decide(rules, call.name, reason)
-        let granted: boolean
-        if (d === "allow") granted = true
-        else if (d === "deny") granted = false
-        else {
-          yield { type: "permissionRequest", id: call.id, name: call.name, input: call.input, reason }
-          granted = cfg.askPermission
-            ? await cfg.askPermission({ id: call.id, name: call.name, input: call.input, reason })
-            : (cfg.autoApprove ?? false)
-        }
+        const askEvents: { id: string; name: string; input: unknown; reason: string }[] = []
+        const granted = await gateToolCall({
+          rules,
+          id: call.id,
+          name: call.name,
+          input: call.input,
+          reason: reasonForCall(call.name, call.input),
+          askPermission: cfg.askPermission,
+          autoApprove: cfg.autoApprove,
+          onAsk: (req) => askEvents.push(req),
+        })
+        for (const req of askEvents) yield { type: "permissionRequest", ...req }
         grants.set(call.id, granted)
       }
 
@@ -117,21 +125,18 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
         const tool = registry.get(call.name)
         if (!tool) return { ok: false, output: "", error: `unknown tool: ${call.name}` }
         if (!grants.get(call.id)) return { ok: false, output: "", error: "permission denied" }
-        const ctx: ToolContext = {
-          cwd,
-          requirePermission: async (reason: string) => {
-            const d = decide(rules, call.name, reason)
-            if (d === "allow") return true
-            if (d === "deny") return false
-            return grants.get(call.id) ?? false
-          },
-        }
+        const ctx: ToolContext = { cwd }
         return tool.execute(call.input, ctx)
       }
 
       const results = new Map<string, ToolResult>()
-      await Promise.all(calls.filter((c) => READ_TOOLS.has(c.name)).map(async (c) => results.set(c.id, await exec(c))))
-      for (const c of calls.filter((c) => !READ_TOOLS.has(c.name))) results.set(c.id, await exec(c))
+      const readonlyCalls = calls.filter((c) => {
+        const t = registry.get(c.name)
+        return t ? isReadonlyTool(t) : false
+      })
+      const mutatorCalls = calls.filter((c) => !readonlyCalls.includes(c))
+      await Promise.all(readonlyCalls.map(async (c) => results.set(c.id, await exec(c))))
+      for (const c of mutatorCalls) results.set(c.id, await exec(c))
 
       for (const call of calls) {
         const toolResult = results.get(call.id)!
@@ -141,7 +146,7 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
       }
 
       steps++
-      yield { type: "contextUpdate", used: budget(), limit, pct: pct() }
+      yield { type: "contextUpdate", used: budgetUsed(messages), limit, pct: budgetPct(messages, limit) }
       yield { type: "turnComplete", step: steps }
     }
 
@@ -150,12 +155,5 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
   } catch (e) {
     yield { type: "error", message: e instanceof Error ? e.message : String(e) }
     store?.setStatus(sessionId, "error")
-  }
-
-  function budget(): number {
-    return messages.reduce((n, m) => n + approxTokens(m), 0)
-  }
-  function pct(): number {
-    return budget() / limit
   }
 }

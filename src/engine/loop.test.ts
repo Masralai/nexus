@@ -101,10 +101,11 @@ test("persists every turn and replays losslessly", async () => {
 test("runs reads in parallel, mutators sequentially", async () => {
   let active = 0
   let maxActive = 0
-  const tracker = (name: string): Tool => ({
+  const tracker = (name: string, readonly: boolean): Tool => ({
     name,
     description: "",
     schema: {},
+    readonly,
     async execute(input) {
       active++
       maxActive = Math.max(maxActive, active)
@@ -118,7 +119,7 @@ test("runs reads in parallel, mutators sequentially", async () => {
       toolCalls: [
         { id: "r1", name: "read", input: "r1" },
         { id: "r2", name: "read", input: "r2" },
-        { id: "b1", name: "bash", input: "b1" },
+        { id: "b1", name: "bash", input: { command: "b1" } },
       ],
     },
     { content: "done" },
@@ -126,7 +127,7 @@ test("runs reads in parallel, mutators sequentially", async () => {
   const evts = await collect(
     run([{ role: "user", content: "go" }], cfg({
       provider,
-      registry: new Map([["read", tracker("read")], ["bash", tracker("bash")]]),
+      registry: new Map([["read", tracker("read", true)], ["bash", tracker("bash", false)]]),
       autoApprove: true,
     })),
   )
@@ -152,19 +153,18 @@ test("denies bash without approval", async () => {
   })
 })
 
-test("plan mode denyTools blocks write without asking", async () => {
+test("plan mode blocks write without asking", async () => {
   const provider = new MockProvider([
     { toolCalls: [{ id: "w1", name: "write", input: { path: "x", content: "y" } }] },
     { content: "ok" },
   ])
-  const write: Tool = { ...echo, name: "write" }
-  const read: Tool = { ...echo, name: "read" }
+  const write: Tool = { ...echo, name: "write", readonly: false }
+  const read: Tool = { ...echo, name: "read", readonly: true }
   const evts = await collect(
     run([{ role: "user", content: "write it" }], cfg({
       provider,
       registry: new Map([["write", write], ["read", read]]),
       mode: "plan",
-      rules: { denyTools: ["write", "edit", "bash"] },
     })),
   )
   expect(provider.lastTools.map((t) => t.name)).toEqual(["read"])
