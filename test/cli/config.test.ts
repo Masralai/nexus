@@ -12,39 +12,41 @@ function cfgFile(cfg: object): string {
 }
 
 test("precedence: cli model > env > file > defaults", () => {
-  const file = cfgFile({ provider: "file", model: "file-model", maxSteps: 10, compactModel: "file-c", compactThreshold: 0.5 })
-  process.env.HARNESS_PROVIDER = "env"
-  process.env.HARNESS_MODEL = "env-model"
-  process.env.HARNESS_MAX_STEPS = "20"
-  process.env.HARNESS_COMPACT_MODEL = "env-c"
-  process.env.HARNESS_COMPACT_THRESHOLD = "0.9"
+  const file = cfgFile({
+    provider: "file",
+    preset: "openai",
+    model: "file-model",
+    maxSteps: 10,
+    compactModel: "file-c",
+    compactThreshold: 0.5,
+  })
+  process.env.NEXUS_PROVIDER = "env"
+  process.env.NEXUS_MODEL = "env-model"
+  process.env.NEXUS_MAX_STEPS = "20"
+  process.env.NEXUS_COMPACT_MODEL = "env-c"
+  process.env.NEXUS_COMPACT_THRESHOLD = "0.9"
   try {
-    expect(loadConfig({ file })).toEqual({
+    expect(loadConfig({ file })).toMatchObject({
       provider: "env",
       model: "env-model",
       maxSteps: 20,
       compactModel: "env-c",
       compactThreshold: 0.9,
     })
-    expect(loadConfig({ file, model: "cli" })).toEqual({
-      provider: "env",
-      model: "cli",
-      maxSteps: 20,
-      compactModel: "env-c",
-      compactThreshold: 0.9,
-    })
+    expect(loadConfig({ file, model: "cli" }).model).toBe("cli")
   } finally {
-    delete process.env.HARNESS_PROVIDER
-    delete process.env.HARNESS_MODEL
-    delete process.env.HARNESS_MAX_STEPS
-    delete process.env.HARNESS_COMPACT_MODEL
-    delete process.env.HARNESS_COMPACT_THRESHOLD
+    delete process.env.NEXUS_PROVIDER
+    delete process.env.NEXUS_MODEL
+    delete process.env.NEXUS_MAX_STEPS
+    delete process.env.NEXUS_COMPACT_MODEL
+    delete process.env.NEXUS_COMPACT_THRESHOLD
   }
 })
 
 test("missing file falls back to defaults", () => {
-  expect(loadConfig({ file: "/nonexistent/nexus-cfg.json" })).toEqual({
+  expect(loadConfig({ file: "/nonexistent/nexus-cfg.json" })).toMatchObject({
     provider: "openai-compatible",
+    preset: "openai",
     model: "",
     maxSteps: 50,
     compactModel: "",

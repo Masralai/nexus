@@ -6,7 +6,7 @@ import { createProvider } from "../providers"
 import type { Provider } from "../providers/types"
 import { defaultTools } from "../tools"
 import { runTUI } from "../tui"
-import { defaultCompactModel, loadConfig } from "./config"
+import { defaultCompactModel, loadConfig, resolveApiKey } from "./config"
 
 export function parseFlags(argv: string[]): { yes: boolean; model?: string; rest: string[] } {
   const yes = argv.includes("--yes")
@@ -16,15 +16,14 @@ export function parseFlags(argv: string[]): { yes: boolean; model?: string; rest
   return { yes, model, rest }
 }
 
-function apiKeyFor(provider: string): string | undefined {
-  const key = provider === "anthropic" ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY
-  return key || undefined
-}
-
 export function makeProvider(model?: string): { provider: Provider; cfg: ReturnType<typeof loadConfig>; compactProvider: Provider } {
   const cfg = loadConfig({ model })
-  const apiKey = apiKeyFor(cfg.provider)
-  const common = { provider: cfg.provider, apiKey, baseUrl: process.env.OPENAI_BASE_URL }
+  const apiKey = resolveApiKey(cfg)
+  const common = {
+    provider: cfg.provider,
+    apiKey,
+    baseUrl: cfg.baseUrl ?? process.env.OPENAI_BASE_URL,
+  }
   return {
     cfg,
     provider: createProvider({ ...common, model: cfg.model }),

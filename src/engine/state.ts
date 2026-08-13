@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import type { Message } from "./types"
@@ -25,7 +25,7 @@ export interface LoadedSession {
 }
 
 export class JSONLStore {
-  constructor(readonly dir: string = join(homedir(), ".harness", "sessions")) {}
+  constructor(readonly dir: string = join(homedir(), ".nexus", "sessions")) {}
 
   path(id: string): string {
     return join(this.dir, `${id}.jsonl`)
@@ -58,5 +58,24 @@ export class JSONLStore {
       else if (rec.type === "status") status = rec.status
     }
     return { meta: first.session, status, messages }
+  }
+
+  list(): SessionMeta[] {
+    try {
+      mkdirSync(this.dir, { recursive: true })
+      return readdirSync(this.dir)
+        .filter((f) => f.endsWith(".jsonl"))
+        .map((f) => {
+          try {
+            return this.load(f.replace(/\.jsonl$/, "")).meta
+          } catch {
+            return null
+          }
+        })
+        .filter((m): m is SessionMeta => m !== null)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    } catch {
+      return []
+    }
   }
 }

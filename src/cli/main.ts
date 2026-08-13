@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { JSONLStore } from "../engine/state"
-import { runInit } from "./init"
 import { makeProvider, parseFlags, runSession, selfTest } from "./run"
+import { runShell } from "../tui"
 
 const argv = process.argv.slice(2)
 const cmd = argv[0]
@@ -11,7 +11,7 @@ switch (cmd) {
   case "run": {
     const task = rest.join(" ")
     if (!task) {
-      console.error('usage: harness run "task" [--model <m>] [--yes]')
+      console.error('usage: nexus run "task" [--model <m>] [--yes]')
       process.exit(1)
     }
     process.exit(await runSession({ task, yes, model }))
@@ -19,7 +19,7 @@ switch (cmd) {
   case "resume": {
     const id = rest[0]
     if (!id) {
-      console.error("usage: harness resume <id> [--model <m>] [--yes]")
+      console.error("usage: nexus resume <id> [--model <m>] [--yes]")
       process.exit(1)
     }
     const store = new JSONLStore()
@@ -37,11 +37,6 @@ switch (cmd) {
       }),
     )
   }
-  case "init": {
-    const force = argv.includes("--force")
-    await runInit({ force })
-    break
-  }
   case "self-test": {
     const { provider } = makeProvider(model)
     process.exit(await selfTest(provider))
@@ -50,14 +45,16 @@ switch (cmd) {
     console.log("nexus 0.1.0")
     break
   case "--help":
-  case undefined:
     console.log(
-      `usage: harness run "task" [--model <m>] [--yes]
-       harness resume <id> [--model <m>] [--yes]
-       harness init [--force]
-       harness self-test [--model <m>]
-       harness --help`,
+      `usage: nexus                    # interactive shell
+       nexus run "task" [--model <m>] [--yes]
+       nexus resume <id> [--model <m>] [--yes]
+       nexus self-test [--model <m>]
+       nexus --help`,
     )
+    break
+  case undefined:
+    runShell()
     break
   default:
     console.log(`unknown command: ${cmd}`)
