@@ -152,6 +152,35 @@ test("denies bash without approval", async () => {
   })
 })
 
+test("plan mode denyTools blocks write without asking", async () => {
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "w1", name: "write", input: { path: "x", content: "y" } }] },
+    { content: "ok" },
+  ])
+  const write: Tool = { ...echo, name: "write" }
+  const read: Tool = { ...echo, name: "read" }
+  const evts = await collect(
+    run([{ role: "user", content: "write it" }], cfg({
+      provider,
+      registry: new Map([["write", write], ["read", read]]),
+      mode: "plan",
+      rules: { denyTools: ["write", "edit", "bash"] },
+    })),
+  )
+  expect(provider.lastTools.map((t) => t.name)).toEqual(["read"])
+  expect(evts.some((e) => e.type === "permissionRequest")).toBe(false)
+  expect(evts.find((e) => e.type === "toolResult")).toEqual({
+    type: "toolResult",
+    id: "w1",
+    name: "write",
+    result: { ok: false, output: "", error: "permission denied" },
+  })
+  expect(provider.lastPrompt[0]).toEqual({
+    role: "user",
+    content: expect.stringContaining("Mode: plan"),
+  })
+})
+
 test("grants bash via askPermission callback", async () => {
   const provider = new MockProvider([{ toolCalls: [{ id: "b1", name: "bash", input: { command: "ls" } }] }, { content: "ok" }])
   const evts = await collect(

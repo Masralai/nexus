@@ -68,7 +68,9 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
         }
       }
 
-      const toolDefs = [...registry.values()].map((t) => ({ name: t.name, description: t.description, schema: t.schema }))
+      const allDefs = [...registry.values()].map((t) => ({ name: t.name, description: t.description, schema: t.schema }))
+      // ponytail: plan hides mutators from the model; denyTools remains a backstop
+      const toolDefs = cfg.mode === "plan" ? allDefs.filter((t) => READ_TOOLS.has(t.name)) : allDefs
       const prompt = [
         { role: "user" as const, content: workingMemory(messages, cfg.mode ?? "build") },
         ...messages.map((m) => (m.role === "tool" ? { ...m, result: { ...m.result, output: truncate(m.result.output) } } : m)),
