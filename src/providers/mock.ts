@@ -11,6 +11,7 @@ export class MockProvider implements Provider {
   readonly supportsCaching = false
   readonly contextWindow: number
   lastPrompt: Message[] = []
+  lastTools: ToolDefinition[] = []
   private responses: MockResponse[]
 
   constructor(script: MockResponse[] = [], contextWindow = 8000) {
@@ -22,8 +23,9 @@ export class MockProvider implements Provider {
     this.responses = [...script]
   }
 
-  async *stream(messages: Message[], _tools: ToolDefinition[], _opts: StreamOptions): AsyncIterable<ProviderEvent> {
+  async *stream(messages: Message[], tools: ToolDefinition[], _opts: StreamOptions): AsyncIterable<ProviderEvent> {
     this.lastPrompt = messages
+    this.lastTools = tools
     const r = this.responses.shift()
     if (!r) {
       yield { type: "done", content: null }
