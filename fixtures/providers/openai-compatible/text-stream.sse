@@ -1,0 +1,8 @@
+data: {"choices":[{"delta":{"content":"Hel"}}]}
+
+data: {"choices":[{"delta":{"content":"lo"}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

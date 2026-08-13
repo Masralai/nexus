@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { JSONLStore } from "../engine/state"
+import { runInit } from "./init"
 import { makeProvider, parseFlags, runSession, selfTest } from "./run"
 
 const argv = process.argv.slice(2)
@@ -36,6 +37,11 @@ switch (cmd) {
       }),
     )
   }
+  case "init": {
+    const force = argv.includes("--force")
+    await runInit({ force })
+    break
+  }
   case "self-test": {
     const { provider } = makeProvider(model)
     process.exit(await selfTest(provider))
@@ -48,6 +54,7 @@ switch (cmd) {
     console.log(
       `usage: harness run "task" [--model <m>] [--yes]
        harness resume <id> [--model <m>] [--yes]
+       harness init [--force]
        harness self-test [--model <m>]
        harness --help`,
     )

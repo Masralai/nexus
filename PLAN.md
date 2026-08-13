@@ -22,7 +22,7 @@ and a TUI both consume.
 ### Non-Goals (v1)
 - No cloud account / hosted routing.
 - No multi-model "auto-router" (provider-gateway territory — explicitly out).
-- No sandboxing/containers in v1 (permission layer only; sandboxing is v1.1+).
+- No sandboxing/containers in v1 (permission layer only; sandboxing is v2).
 - No keyring integration in v1 (env + config file only).
 - No browser/data agents (engine is model-agnostic, but v1 ships coding tools only).
 
@@ -257,7 +257,9 @@ harness self-test           # manual real-key smoke test
   CTRL-C → session survives.
 
 **v1.1+**
-- Compaction (cheap-model), sandboxing, `harness init`, installers (bunx/brew).
+- Compaction (cheap-model), `harness init`, installers (compile / bunx), recorded
+  fixtures + CI. Spec: [specs/v1.1.md](specs/v1.1.md).
+- Sandboxing (containers/seccomp) is **v2** — see §12 (not v1.1).
 
 ---
 

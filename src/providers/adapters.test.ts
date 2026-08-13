@@ -1,8 +1,16 @@
 import { expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { Anthropic, toAnthropicMessages } from "./anthropic"
 import { OpenAICompatible, toChatMessages } from "./openai-compatible"
 import type { ProviderEvent } from "./types"
 import type { Message, ToolDefinition } from "../engine/types"
+
+const root = join(import.meta.dir, "../../fixtures/providers")
+
+function fixture(...parts: string[]): string {
+  return readFileSync(join(root, ...parts), "utf8")
+}
 
 function fakeFetch(sse: string, status = 200): typeof fetch {
   return (async () => new Response(sse, { status })) as unknown as typeof fetch
@@ -17,13 +25,12 @@ async function collect(iter: AsyncIterable<ProviderEvent>): Promise<ProviderEven
 const emptyTools: ToolDefinition[] = []
 
 test("openai: streams text tokens then done", async () => {
-  const sse = [
-    'data: {"choices":[{"delta":{"content":"Hel"}}]}',
-    'data: {"choices":[{"delta":{"content":"lo"}}]}',
-    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
-    "data: [DONE]",
-  ].join("\n\n") + "\n\n"
-  const p = new OpenAICompatible({ apiKey: "k", model: "m", contextWindow: 8000, fetchImpl: fakeFetch(sse) })
+  const p = new OpenAICompatible({
+    apiKey: "k",
+    model: "m",
+    contextWindow: 8000,
+    fetchImpl: fakeFetch(fixture("openai-compatible", "text-stream.sse")),
+  })
   expect(await collect(p.stream([{ role: "user", content: "hi" }], emptyTools, {}))).toEqual([
     { type: "token", text: "Hel" },
     { type: "token", text: "lo" },
@@ -32,13 +39,12 @@ test("openai: streams text tokens then done", async () => {
 })
 
 test("openai: aggregates streamed tool calls", async () => {
-  const sse = [
-    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read","arguments":"{\\"path\\":\\""}}]}}]}',
-    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"a.txt\\"}"}}]}}]}',
-    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
-    "data: [DONE]",
-  ].join("\n\n") + "\n\n"
-  const p = new OpenAICompatible({ apiKey: "k", model: "m", contextWindow: 8000, fetchImpl: fakeFetch(sse) })
+  const p = new OpenAICompatible({
+    apiKey: "k",
+    model: "m",
+    contextWindow: 8000,
+    fetchImpl: fakeFetch(fixture("openai-compatible", "tool-calls.sse")),
+  })
   expect(await collect(p.stream([], emptyTools, {}))).toEqual([
     { type: "toolCall", id: "c1", name: "read", input: { path: "a.txt" } },
     { type: "done", content: null },
@@ -64,12 +70,12 @@ test("openai: toChatMessages is lossless for canonical messages", () => {
 })
 
 test("anthropic: streams text tokens then done", async () => {
-  const sse = [
-    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}',
-    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"!"}}',
-    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
-  ].join("\n\n") + "\n\n"
-  const p = new Anthropic({ apiKey: "k", model: "m", contextWindow: 200000, fetchImpl: fakeFetch(sse) })
+  const p = new Anthropic({
+    apiKey: "k",
+    model: "m",
+    contextWindow: 200000,
+    fetchImpl: fakeFetch(fixture("anthropic", "text-stream.sse")),
+  })
   expect(await collect(p.stream([{ role: "user", content: "hi" }], emptyTools, {}))).toEqual([
     { type: "token", text: "Hi" },
     { type: "token", text: "!" },
@@ -78,13 +84,12 @@ test("anthropic: streams text tokens then done", async () => {
 })
 
 test("anthropic: aggregates streamed tool_use blocks", async () => {
-  const sse = [
-    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"read","input":{}}}',
-    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\""}}',
-    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"a.txt\\"}"}}',
-    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}',
-  ].join("\n\n") + "\n\n"
-  const p = new Anthropic({ apiKey: "k", model: "m", contextWindow: 200000, fetchImpl: fakeFetch(sse) })
+  const p = new Anthropic({
+    apiKey: "k",
+    model: "m",
+    contextWindow: 200000,
+    fetchImpl: fakeFetch(fixture("anthropic", "tool-use.sse")),
+  })
   expect(await collect(p.stream([], emptyTools, {}))).toEqual([
     { type: "toolCall", id: "t1", name: "read", input: { path: "a.txt" } },
     { type: "done", content: null },

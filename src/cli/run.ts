@@ -6,7 +6,7 @@ import { createProvider } from "../providers"
 import type { Provider } from "../providers/types"
 import { defaultTools } from "../tools"
 import { runTUI } from "../tui"
-import { loadConfig } from "./config"
+import { defaultCompactModel, loadConfig } from "./config"
 
 export function parseFlags(argv: string[]): { yes: boolean; model?: string; rest: string[] } {
   const yes = argv.includes("--yes")
@@ -16,16 +16,21 @@ export function parseFlags(argv: string[]): { yes: boolean; model?: string; rest
   return { yes, model, rest }
 }
 
-export function makeProvider(model?: string): { provider: Provider; cfg: ReturnType<typeof loadConfig> } {
+function apiKeyFor(provider: string): string | undefined {
+  const key = provider === "anthropic" ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY
+  return key || undefined
+}
+
+export function makeProvider(model?: string): { provider: Provider; cfg: ReturnType<typeof loadConfig>; compactProvider: Provider } {
   const cfg = loadConfig({ model })
-  const apiKey = cfg.provider === "anthropic" ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY
+  const apiKey = apiKeyFor(cfg.provider)
+  const common = { provider: cfg.provider, apiKey, baseUrl: process.env.OPENAI_BASE_URL }
   return {
     cfg,
-    provider: createProvider({
-      provider: cfg.provider,
-      model: cfg.model,
-      apiKey: apiKey || undefined,
-      baseUrl: process.env.OPENAI_BASE_URL,
+    provider: createProvider({ ...common, model: cfg.model }),
+    compactProvider: createProvider({
+      ...common,
+      model: cfg.compactModel || defaultCompactModel(cfg.provider),
     }),
   }
 }
@@ -43,6 +48,8 @@ export async function consumeHeadless(
     signal: AbortSignal
     autoApprove: boolean
     resume?: boolean
+    compactProvider?: Provider
+    compactThreshold?: number
     write?: (s: string) => void
   },
 ): Promise<number> {
@@ -59,6 +66,8 @@ export async function consumeHeadless(
     signal: opts.signal,
     autoApprove: opts.autoApprove,
     resume: opts.resume,
+    compactProvider: opts.compactProvider,
+    compactThreshold: opts.compactThreshold,
   })) {
     if (ev.type === "tokenDelta") write(ev.delta)
     else if (ev.type === "error") {
@@ -95,7 +104,7 @@ export interface SessionOpts {
 }
 
 export async function runSession(opts: SessionOpts): Promise<number> {
-  const { provider, cfg } = makeProvider(opts.model)
+  const { provider, cfg, compactProvider } = makeProvider(opts.model)
   const store = opts.store ?? new JSONLStore()
   const sessionId = opts.sessionId ?? randomUUID()
   const cwd = opts.cwd ?? process.cwd()
@@ -122,6 +131,8 @@ export async function runSession(opts: SessionOpts): Promise<number> {
         signal: ac.signal,
         autoApprove: opts.yes,
         resume: opts.resume,
+        compactProvider,
+        compactThreshold: cfg.compactThreshold,
       })
     }
     return await new Promise<number>((resolve) => {
@@ -139,6 +150,8 @@ export async function runSession(opts: SessionOpts): Promise<number> {
         abort: () => ac.abort(),
         autoApprove: opts.yes,
         resume: opts.resume,
+        compactProvider,
+        compactThreshold: cfg.compactThreshold,
         onDone: resolve,
       })
     })

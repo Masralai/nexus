@@ -1,0 +1,8 @@
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read","arguments":"{\"path\":\""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"a.txt\"}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+

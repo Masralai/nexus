@@ -19,6 +19,8 @@ export interface TUIRunOptions {
   abort?: () => void
   autoApprove?: boolean
   resume?: boolean
+  compactProvider?: Provider
+  compactThreshold?: number
   onDone?: (code: number) => void
 }
 
@@ -47,6 +49,8 @@ export function runTUI(opts: TUIRunOptions): void {
           signal: opts.signal,
           autoApprove: opts.autoApprove,
           resume: opts.resume,
+          compactProvider: opts.compactProvider,
+          compactThreshold: opts.compactThreshold,
           askPermission: ask,
         })) {
           emit(ev)

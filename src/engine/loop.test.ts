@@ -187,3 +187,31 @@ test("resume appends without duplicating meta", async () => {
   expect(store.load("s1").status).toBe("done")
   expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "assistant"])
 })
+test("compacts when over threshold then continues", async () => {
+  const messages: Message[] = Array.from({ length: 10 }, (_, i) => ({
+    role: "user" as const,
+    content: "x".repeat(200) + String(i),
+  }))
+  const provider = new MockProvider([{ content: "done" }], 100)
+  const cheap = new MockProvider([{ content: "SUM" }])
+  const evts = await collect(
+    run(messages, cfg({ provider, compactProvider: cheap, compactThreshold: 0.1, keepRecent: 2 })),
+  )
+  expect(cheap.lastPrompt.length).toBeGreaterThan(0)
+  expect(messages[0]).toEqual({ role: "user", content: "[prior context]\nSUM" })
+  expect(messages.at(-1)).toEqual({ role: "assistant", content: "done" })
+  expect(evts.some((e) => e.type === "contextUpdate")).toBe(true)
+  expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 0, result: "done" })
+})
+
+test("skips compaction when under threshold", async () => {
+  const cheap = new MockProvider([{ content: "SUM" }])
+  await collect(
+    run([{ role: "user", content: "hi" }], cfg({
+      provider: new MockProvider([{ content: "ok" }], 100_000),
+      compactProvider: cheap,
+      compactThreshold: 0.8,
+    })),
+  )
+  expect(cheap.lastPrompt).toEqual([])
+})

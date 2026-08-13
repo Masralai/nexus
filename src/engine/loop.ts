@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import type { Provider } from "../providers/types"
 import { READ_TOOLS } from "../tools"
+import { compactMessages, shouldCompact } from "./compact"
 import { approxTokens, truncate, workingMemory } from "./context"
 import { decide, type PermissionRules } from "./permission"
 import type { JSONLStore } from "./state"
@@ -18,6 +19,9 @@ export interface RunConfig {
   rules?: PermissionRules
   autoApprove?: boolean
   resume?: boolean
+  compactProvider?: Provider
+  compactThreshold?: number
+  keepRecent?: number
   askPermission?: (req: { id: string; name: string; input: unknown; reason: string }) => Promise<boolean>
 }
 
@@ -27,6 +31,8 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
   const store = cfg.store
   const sessionId = cfg.sessionId ?? randomUUID()
   const limit = provider.contextWindow
+  const threshold = cfg.compactThreshold ?? 0.8
+  const keepRecent = cfg.keepRecent ?? 6
 
   // ponytail: resume skips create so meta isn't duplicated
   if (store && !cfg.resume) {
@@ -44,6 +50,18 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
         return
       }
       if (steps >= maxSteps) break
+
+      // ponytail: compact in-memory only; JSONL keeps full history
+      if (cfg.compactProvider && shouldCompact(pct(), threshold)) {
+        try {
+          const next = await compactMessages(messages, cfg.compactProvider, keepRecent)
+          messages.length = 0
+          messages.push(...next)
+          yield { type: "contextUpdate", used: budget(), limit, pct: pct() }
+        } catch {
+          // skip compaction; continue with truncation-only
+        }
+      }
 
       const toolDefs = [...registry.values()].map((t) => ({ name: t.name, description: t.description, schema: t.schema }))
       const prompt = [
