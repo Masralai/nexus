@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test"
 import { decide, type PermissionRules } from "./permission"
-import { approxTokens, truncate, workingMemory } from "./context"
+import { approxTokens, assemblePrompt, truncate, workingMemory } from "./context"
 import type { Message } from "./types"
+import type { Skill } from "../skills"
 
 test("decide: default asks on bash, allows the rest", () => {
   const rules: PermissionRules = {}
@@ -72,8 +73,7 @@ test("decide: plan denyTools blocks write/edit/bash", () => {
   expect(decide(rules, "read", "x")).toBe("allow")
 })
 
-test("assemblePrompt prepends working memory and truncates tool output", async () => {
-  const { assemblePrompt } = await import("./context")
+test("assemblePrompt prepends working memory and truncates tool output", () => {
   const msgs: Message[] = [
     { role: "user", content: "task" },
     {
@@ -88,4 +88,18 @@ test("assemblePrompt prepends working memory and truncates tool output", async (
   const tool = prompt[2] as Extract<Message, { role: "tool" }>
   expect(tool.result.output).toContain("[...truncated")
   expect(msgs[1].role === "tool" && msgs[1].result.output.length).toBe(5000)
+})
+
+test("workingMemory includes active skills", () => {
+  const skill: Skill = {
+    id: "ponytail",
+    name: "ponytail",
+    description: "lazy",
+    body: "Do less.",
+    path: "/x",
+  }
+  const wm = workingMemory([{ role: "user", content: "hi" }], "build", [skill])
+  expect(wm).toContain("[active-skills]")
+  expect(wm).toContain("## Skill: ponytail")
+  expect(wm).toContain("Do less.")
 })

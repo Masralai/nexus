@@ -3,6 +3,7 @@ import type { AgentMode } from "./mode"
 import { modePolicy } from "./mode"
 import type { Provider } from "../providers/types"
 import { compactMessages, shouldCompact } from "./compact"
+import { formatSkillsPrompt, type Skill } from "../skills"
 
 export function truncate(text: string, max = 4000): string {
   return text.length <= max ? text : `${text.slice(0, max)}\n[...truncated ${text.length - max} chars]`
@@ -19,7 +20,11 @@ Do not use tools for greetings, chitchat, or questions you can answer without th
 Use tools only when the user wants file, shell, or repository work.
 If a tool returns "permission denied", the user declined that tool — say that; do not invent OS/sandbox permission failures.`
 
-export function workingMemory(messages: Message[], mode: AgentMode = "build"): string {
+export function workingMemory(
+  messages: Message[],
+  mode: AgentMode = "build",
+  skills: Skill[] = [],
+): string {
   const users = messages.filter((m) => m.role === "user")
   const task = users.at(-1)?.content ?? ""
   const recent = messages
@@ -27,8 +32,10 @@ export function workingMemory(messages: Message[], mode: AgentMode = "build"): s
     .map((m) => (m.role === "tool" ? `[${m.name}] ${m.result.output.slice(0, 120)}` : (m.content ?? "").slice(0, 120)))
     .join("\n")
   const { guidance } = modePolicy(mode)
+  const skillBlock = formatSkillsPrompt(skills)
+  const skillsSection = skillBlock ? `\n\n${skillBlock}` : ""
   return `[working-memory]
-${GUIDANCE}${guidance}
+${GUIDANCE}${guidance}${skillsSection}
 
 task: ${task.slice(0, 300)}
 recent:
@@ -47,9 +54,13 @@ export function budgetPct(messages: Message[], limit: number): number {
  * Build the provider prompt for a turn step.
  * Durable session messages are unchanged; truncation is prompt-only.
  */
-export function assemblePrompt(messages: Message[], mode: AgentMode = "build"): Message[] {
+export function assemblePrompt(
+  messages: Message[],
+  mode: AgentMode = "build",
+  skills: Skill[] = [],
+): Message[] {
   return [
-    { role: "user", content: workingMemory(messages, mode) },
+    { role: "user", content: workingMemory(messages, mode, skills) },
     ...messages.map((m) =>
       m.role === "tool" ? { ...m, result: { ...m.result, output: truncate(m.result.output) } } : m,
     ),

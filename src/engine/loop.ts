@@ -5,6 +5,7 @@ import { advertiseTools, modePolicy, isReadonlyTool, type AgentMode } from "./mo
 import { gateToolCall, reasonForCall, type PermissionRules } from "./permission"
 import type { JSONLStore } from "./state"
 import type { EngineEvent, Message, Tool, ToolCall, ToolContext, ToolResult } from "./types"
+import type { Skill } from "../skills"
 
 export interface RunConfig {
   provider: Provider
@@ -23,6 +24,8 @@ export interface RunConfig {
   compactThreshold?: number
   keepRecent?: number
   mode?: AgentMode
+  /** Active agent skills injected into working memory. */
+  skills?: Skill[]
   askPermission?: (req: { id: string; name: string; input: unknown; reason: string }) => Promise<boolean>
 }
 
@@ -81,7 +84,7 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
       }
 
       const toolDefs = advertiseTools(registry, mode)
-      const prompt = assemblePrompt(messages, mode)
+      const prompt = assemblePrompt(messages, mode, cfg.skills ?? [])
       const stream = provider.stream(prompt, toolDefs, { signal: cfg.signal })
 
       let content: string | null = null

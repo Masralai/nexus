@@ -5,6 +5,7 @@ import { JSONLStore } from "../engine/state"
 import type { EngineEvent, Message, Tool } from "../engine/types"
 import { createProvider } from "../providers"
 import type { Provider } from "../providers/types"
+import type { Skill } from "../skills"
 import { defaultTools } from "../tools"
 import { defaultCompactModel, loadConfig, resolveApiKey, type NexusConfig } from "./config"
 
@@ -50,6 +51,7 @@ export interface TurnOpts {
   sessionId?: string
   resume?: boolean
   mode?: AgentMode
+  skills?: Skill[]
   autoApprove?: boolean
   signal?: AbortSignal
   askPermission?: RunConfig["askPermission"]
@@ -75,6 +77,7 @@ export async function* runTurn(opts: TurnOpts): AsyncIterable<EngineEvent> {
     autoApprove: opts.autoApprove,
     resume: opts.resume,
     mode: opts.mode,
+    skills: opts.skills,
     compactProvider: rt.compactProvider,
     compactThreshold: opts.compactThreshold ?? rt.cfg.compactThreshold,
     askPermission: opts.askPermission,
