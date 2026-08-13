@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { MockProvider } from "../providers/mock"
@@ -169,4 +170,20 @@ test("injects structured working-memory at the front of each prompt", async () =
     content: expect.stringContaining("task: fix the tests"),
   })
   expect((wm as { content: string }).content).toContain("[working-memory]")
+})
+
+test("resume appends without duplicating meta", async () => {
+  const dir = join(tmpdir(), "nexus-loop-" + Math.random().toString(36).slice(2))
+  const store = new JSONLStore(dir)
+  const messages: Message[] = [{ role: "user", content: "go" }]
+  await collect(run(messages, cfg({ provider: new MockProvider([{ content: "hi" }]), store, sessionId: "s1" })))
+  await collect(
+    run(messages, cfg({ provider: new MockProvider([{ content: "again" }]), store, sessionId: "s1", resume: true })),
+  )
+  const metas = readFileSync(store.path("s1"), "utf8")
+    .split("\n")
+    .filter((l) => l.includes('"type":"meta"'))
+  expect(metas).toHaveLength(1)
+  expect(store.load("s1").status).toBe("done")
+  expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "assistant"])
 })

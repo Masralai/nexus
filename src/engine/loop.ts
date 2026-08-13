@@ -17,6 +17,7 @@ export interface RunConfig {
   signal?: AbortSignal
   rules?: PermissionRules
   autoApprove?: boolean
+  resume?: boolean
   askPermission?: (req: { id: string; name: string; input: unknown; reason: string }) => Promise<boolean>
 }
 
@@ -27,7 +28,10 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
   const sessionId = cfg.sessionId ?? randomUUID()
   const limit = provider.contextWindow
 
-  store?.create({ id: sessionId, cwd, model, provider: provider.id, createdAt: new Date().toISOString() }, messages)
+  // ponytail: resume skips create so meta isn't duplicated
+  if (store && !cfg.resume) {
+    store.create({ id: sessionId, cwd, model, provider: provider.id, createdAt: new Date().toISOString() }, messages)
+  }
 
   let steps = 0
   let result = ""
