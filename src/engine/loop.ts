@@ -39,6 +39,22 @@ function mergeRules(base: PermissionRules, extra?: PermissionRules): PermissionR
   }
 }
 
+function sameMessage(a: Message, b: Message): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+/** Caller messages not already in the Session store, preserving order. */
+function unpersisted(caller: readonly Message[], persisted: readonly Message[]): Message[] {
+  const remaining = [...persisted]
+  const incoming: Message[] = []
+  for (const m of caller) {
+    const idx = remaining.findIndex((p) => sameMessage(p, m))
+    if (idx === -1) incoming.push(m)
+    else remaining.splice(idx, 1)
+  }
+  return incoming
+}
+
 export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncIterable<EngineEvent> {
   const { provider, registry, cwd, model, maxSteps } = cfg
   const mode = cfg.mode ?? "build"
@@ -49,13 +65,18 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
   const limit = provider.contextWindow
   const threshold = cfg.compactThreshold ?? 0.8
   const keepRecent = cfg.keepRecent ?? 6
-  let working = messages.slice()
+  let working: Message[]
 
   if (store && !cfg.resume) {
+    working = messages.slice()
     store.create({ id: sessionId, cwd, model, provider: provider.id, createdAt: new Date().toISOString() }, working)
   } else if (store && cfg.resume) {
     const persisted = store.load(sessionId).messages
-    for (const m of messages.slice(persisted.length)) store.append(sessionId, m)
+    const incoming = unpersisted(messages, persisted)
+    for (const m of incoming) store.append(sessionId, m)
+    working = persisted.concat(incoming)
+  } else {
+    working = messages.slice()
   }
 
   let steps = 0
