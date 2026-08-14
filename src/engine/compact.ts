@@ -25,11 +25,11 @@ export async function summarize(cheap: Provider, head: Message[]): Promise<strin
 }
 
 export async function compactMessages(
-  messages: Message[],
+  messages: readonly Message[],
   cheap: Provider,
   keepRecent = 6,
 ): Promise<Message[]> {
-  if (messages.length <= keepRecent) return messages
+  if (messages.length <= keepRecent) return messages.slice()
   const tail = messages.slice(-keepRecent)
   const head = messages.slice(0, -keepRecent)
   const summary = await summarize(cheap, head)

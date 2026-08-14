@@ -21,7 +21,7 @@ Use tools only when the user wants file, shell, or repository work.
 If a tool returns "permission denied", the user declined that tool — say that; do not invent OS/sandbox permission failures.`
 
 export function workingMemory(
-  messages: Message[],
+  messages: readonly Message[],
   mode: AgentMode = "build",
   skills: Skill[] = [],
 ): string {
@@ -42,11 +42,11 @@ recent:
 ${recent}`
 }
 
-export function budgetUsed(messages: Message[]): number {
+export function budgetUsed(messages: readonly Message[]): number {
   return messages.reduce((n, m) => n + approxTokens(m), 0)
 }
 
-export function budgetPct(messages: Message[], limit: number): number {
+export function budgetPct(messages: readonly Message[], limit: number): number {
   return budgetUsed(messages) / limit
 }
 
@@ -55,7 +55,7 @@ export function budgetPct(messages: Message[], limit: number): number {
  * Durable session messages are unchanged; truncation is prompt-only.
  */
 export function assemblePrompt(
-  messages: Message[],
+  messages: readonly Message[],
   mode: AgentMode = "build",
   skills: Skill[] = [],
 ): Message[] {
@@ -74,13 +74,10 @@ export interface CompactConfig {
   limit: number
 }
 
-/** Compact in-memory messages when over threshold; returns whether compaction ran. */
-export async function maybeCompact(messages: Message[], cfg: CompactConfig): Promise<boolean> {
+/** Compact when over threshold. Returns a new list, or null if compaction did not run. Never mutates input. */
+export async function maybeCompact(messages: readonly Message[], cfg: CompactConfig): Promise<Message[] | null> {
   const threshold = cfg.threshold ?? 0.8
   const keepRecent = cfg.keepRecent ?? 6
-  if (!shouldCompact(budgetPct(messages, cfg.limit), threshold)) return false
-  const next = await compactMessages(messages, cfg.provider, keepRecent)
-  messages.length = 0
-  messages.push(...next)
-  return true
+  if (!shouldCompact(budgetPct(messages, cfg.limit), threshold)) return null
+  return compactMessages(messages, cfg.provider, keepRecent)
 }

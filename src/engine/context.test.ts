@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
+import { MockProvider } from "../providers/mock"
 import { decide, type PermissionRules } from "./permission"
-import { approxTokens, assemblePrompt, truncate, workingMemory } from "./context"
+import { approxTokens, assemblePrompt, maybeCompact, truncate, workingMemory } from "./context"
 import type { Message } from "./types"
 import type { Skill } from "../skills"
 
@@ -88,6 +89,33 @@ test("assemblePrompt prepends working memory and truncates tool output", () => {
   const tool = prompt[2] as Extract<Message, { role: "tool" }>
   expect(tool.result.output).toContain("[...truncated")
   expect(msgs[1].role === "tool" && msgs[1].result.output.length).toBe(5000)
+})
+
+test("maybeCompact returns a new list and leaves the input unchanged", async () => {
+  const messages: Message[] = Array.from({ length: 8 }, (_, i) => ({
+    role: "user" as const,
+    content: "x".repeat(200) + String(i),
+  }))
+  const snapshot = structuredClone(messages)
+  const cheap = new MockProvider([{ content: "SUM" }])
+  const out = await maybeCompact(messages, { provider: cheap, threshold: 0.1, keepRecent: 2, limit: 100 })
+  expect(messages).toEqual(snapshot)
+  expect(out).not.toBeNull()
+  expect(out).not.toBe(messages)
+  expect(out![0]).toEqual({ role: "user", content: "[prior context]\nSUM" })
+  expect(out!.slice(1).map((m) => (m as { content: string }).content)).toEqual([
+    "x".repeat(200) + "6",
+    "x".repeat(200) + "7",
+  ])
+})
+
+test("maybeCompact returns null under threshold and does not call the cheap provider", async () => {
+  const messages: Message[] = [{ role: "user", content: "hi" }]
+  const cheap = new MockProvider([{ content: "SUM" }])
+  const out = await maybeCompact(messages, { provider: cheap, threshold: 0.8, keepRecent: 6, limit: 100_000 })
+  expect(out).toBeNull()
+  expect(cheap.lastPrompt).toEqual([])
+  expect(messages).toEqual([{ role: "user", content: "hi" }])
 })
 
 test("workingMemory includes active skills", () => {

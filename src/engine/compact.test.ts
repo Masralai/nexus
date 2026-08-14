@@ -16,6 +16,8 @@ test("compactMessages keeps tail and prepends prior context", async () => {
   }))
   const cheap = new MockProvider([{ content: "SUM" }])
   const out = await compactMessages(messages, cheap, 3)
+  expect(messages.map((m) => (m as { content: string }).content)).toEqual(["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7"])
+  expect(out).not.toBe(messages)
   expect(out).toHaveLength(4)
   expect(out[0]).toEqual({ role: "user", content: "[prior context]\nSUM" })
   expect(out.slice(1).map((m) => (m as { content: string }).content)).toEqual(["m5", "m6", "m7"])
@@ -24,6 +26,8 @@ test("compactMessages keeps tail and prepends prior context", async () => {
 test("compactMessages is a no-op when under keepRecent", async () => {
   const messages: Message[] = [{ role: "user", content: "a" }, { role: "user", content: "b" }]
   const cheap = new MockProvider([{ content: "SUM" }])
-  expect(await compactMessages(messages, cheap, 6)).toEqual(messages)
+  const out = await compactMessages(messages, cheap, 6)
+  expect(out).toEqual(messages)
+  expect(out).not.toBe(messages)
   expect(cheap.lastPrompt).toEqual([])
 })
