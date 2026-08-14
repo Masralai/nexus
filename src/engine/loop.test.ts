@@ -265,6 +265,108 @@ test("a compacting Turn leaves the caller's messages unchanged", async () => {
   expect(messages).toEqual(snapshot)
 })
 
+test("resume after a compacting Turn appends from the Session store", async () => {
+  const dir = join(tmpdir(), "nexus-loop-" + Math.random().toString(36).slice(2))
+  const store = new JSONLStore(dir)
+  const original: Message[] = Array.from({ length: 10 }, (_, i) => ({
+    role: "user" as const,
+    content: "x".repeat(200) + String(i),
+  }))
+  await collect(
+    run(original, cfg({
+      provider: new MockProvider([{ content: "done" }], 100),
+      compactProvider: new MockProvider([{ content: "SUM" }]),
+      compactThreshold: 0.1,
+      keepRecent: 2,
+      store,
+      sessionId: "s1",
+    })),
+  )
+  const continued: Message[] = [...original, { role: "user", content: "again" }]
+  const snapshot = structuredClone(continued)
+  const provider = new MockProvider([{ content: "ok" }], 100)
+  const evts = await collect(
+    run(continued, cfg({
+      provider,
+      compactProvider: new MockProvider([{ content: "SUM2" }]),
+      compactThreshold: 0.1,
+      keepRecent: 2,
+      store,
+      sessionId: "s1",
+      resume: true,
+    })),
+  )
+  const loaded = store.load("s1").messages
+  expect(loaded.slice(0, 10)).toEqual(original)
+  expect(loaded.map((m) => m.role)).toEqual([
+    "user",
+    "user",
+    "user",
+    "user",
+    "user",
+    "user",
+    "user",
+    "user",
+    "user",
+    "user",
+    "assistant",
+    "user",
+    "assistant",
+  ])
+  expect(loaded.at(-2)).toEqual({ role: "user", content: "again" })
+  expect(loaded.at(-1)).toEqual({ role: "assistant", content: "ok" })
+  expect(continued).toEqual(snapshot)
+  expect(provider.lastPrompt[1]).toEqual({ role: "user", content: "[prior context]\nSUM2" })
+  const update = evts.find((e) => e.type === "contextUpdate")
+  expect(update?.type).toBe("contextUpdate")
+  if (update?.type === "contextUpdate") {
+    expect(update.used).toBeLessThan(budgetUsed(loaded))
+  }
+  expect(readFileSync(store.path("s1"), "utf8")).not.toContain("[prior context]")
+})
+
+test("a compacting Turn never persists the summary; Session replay is lossless", async () => {
+  const dir = join(tmpdir(), "nexus-loop-" + Math.random().toString(36).slice(2))
+  const store = new JSONLStore(dir)
+  const original: Message[] = Array.from({ length: 10 }, (_, i) => ({
+    role: "user" as const,
+    content: "x".repeat(200) + String(i),
+  }))
+  await collect(
+    run(original, cfg({
+      provider: new MockProvider([{ content: "done" }], 100),
+      compactProvider: new MockProvider([{ content: "SUM" }]),
+      compactThreshold: 0.1,
+      keepRecent: 2,
+      store,
+      sessionId: "s1",
+    })),
+  )
+  const jsonl = readFileSync(store.path("s1"), "utf8")
+  expect(jsonl).not.toContain("[prior context]")
+  expect(store.load("s1").messages).toEqual([...original, { role: "assistant", content: "done" }])
+})
+
+test("a second resume with the same caller list does not duplicate Session messages", async () => {
+  const dir = join(tmpdir(), "nexus-loop-" + Math.random().toString(36).slice(2))
+  const store = new JSONLStore(dir)
+  const original: Message[] = [{ role: "user", content: "go" }]
+  await collect(
+    run(original, cfg({ provider: new MockProvider([{ content: "hi" }]), store, sessionId: "s1" })),
+  )
+  const continued: Message[] = [...original, { role: "user", content: "again" }]
+  await collect(
+    run(continued, cfg({ provider: new MockProvider([{ content: "ok" }]), store, sessionId: "s1", resume: true })),
+  )
+  await collect(
+    run(continued, cfg({ provider: new MockProvider([{ content: "ok2" }]), store, sessionId: "s1", resume: true })),
+  )
+  const loaded = store.load("s1").messages
+  expect(loaded.filter((m) => m.role === "user" && m.content === "again")).toHaveLength(1)
+  expect(loaded.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant", "assistant"])
+  expect(loaded.at(-1)).toEqual({ role: "assistant", content: "ok2" })
+})
+
 test("skips compaction when under threshold", async () => {
   const cheap = new MockProvider([{ content: "SUM" }])
   await collect(
