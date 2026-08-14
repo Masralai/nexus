@@ -4,3 +4,5 @@ AGENTS.md
 .nexus.json
 .nexus/
 dist/
+.cursorrules
+docs/
