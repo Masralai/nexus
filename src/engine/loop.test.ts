@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { MockProvider } from "../providers/mock"
 import { JSONLStore } from "./state"
 import { run } from "./loop"
+import { budgetUsed } from "./context"
 import type { EngineEvent, Message, Tool } from "./types"
 
 const echo: Tool = {
@@ -94,8 +95,13 @@ test("persists every turn and replays losslessly", async () => {
   await collect(run(messages, cfg({ provider, registry: new Map([["echo", echo]]), store, sessionId: "s1" })))
   const loaded = store.load("s1")
   expect(loaded.status).toBe("done")
-  expect(loaded.messages).toEqual(messages)
-  expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"])
+  expect(loaded.messages).toEqual([
+    { role: "user", content: "go" },
+    { role: "assistant", content: null, toolCalls: [{ id: "c1", name: "echo", input: {} }] },
+    { role: "tool", toolCallId: "c1", name: "echo", result: { ok: true, output: "{}" } },
+    { role: "assistant", content: "ok" },
+  ])
+  expect(messages).toEqual([{ role: "user", content: "go" }])
 })
 
 test("runs reads in parallel, mutators sequentially", async () => {
@@ -204,11 +210,13 @@ test("injects structured working-memory at the front of each prompt", async () =
 test("resume appends without duplicating meta", async () => {
   const dir = join(tmpdir(), "nexus-loop-" + Math.random().toString(36).slice(2))
   const store = new JSONLStore(dir)
-  const messages: Message[] = [{ role: "user", content: "go" }]
-  await collect(run(messages, cfg({ provider: new MockProvider([{ content: "hi" }]), store, sessionId: "s1" })))
-  messages.push({ role: "user", content: "again" })
   await collect(
-    run(messages, cfg({ provider: new MockProvider([{ content: "ok" }]), store, sessionId: "s1", resume: true })),
+    run([{ role: "user", content: "go" }], cfg({ provider: new MockProvider([{ content: "hi" }]), store, sessionId: "s1" })),
+  )
+  const continued: Message[] = [...store.load("s1").messages, { role: "user", content: "again" }]
+  const snapshot = structuredClone(continued)
+  await collect(
+    run(continued, cfg({ provider: new MockProvider([{ content: "ok" }]), store, sessionId: "s1", resume: true })),
   )
   const metas = readFileSync(store.path("s1"), "utf8")
     .split("\n")
@@ -216,7 +224,7 @@ test("resume appends without duplicating meta", async () => {
   expect(metas).toHaveLength(1)
   expect(store.load("s1").status).toBe("done")
   expect(store.load("s1").messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"])
-  expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"])
+  expect(continued).toEqual(snapshot)
 })
 test("compacts when over threshold then continues", async () => {
   const messages: Message[] = Array.from({ length: 10 }, (_, i) => ({
@@ -229,10 +237,32 @@ test("compacts when over threshold then continues", async () => {
     run(messages, cfg({ provider, compactProvider: cheap, compactThreshold: 0.1, keepRecent: 2 })),
   )
   expect(cheap.lastPrompt.length).toBeGreaterThan(0)
-  expect(messages[0]).toEqual({ role: "user", content: "[prior context]\nSUM" })
-  expect(messages.at(-1)).toEqual({ role: "assistant", content: "done" })
-  expect(evts.some((e) => e.type === "contextUpdate")).toBe(true)
+  expect(messages[0]).toEqual({ role: "user", content: "x".repeat(200) + "0" })
+  expect(provider.lastPrompt[1]).toEqual({ role: "user", content: "[prior context]\nSUM" })
+  const update = evts.find((e) => e.type === "contextUpdate")
+  expect(update?.type).toBe("contextUpdate")
+  if (update?.type === "contextUpdate") {
+    expect(update.limit).toBe(100)
+    expect(update.used).toBeLessThan(budgetUsed(messages))
+  }
   expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 0, result: "done" })
+})
+
+test("a compacting Turn leaves the caller's messages unchanged", async () => {
+  const messages: Message[] = Array.from({ length: 10 }, (_, i) => ({
+    role: "user" as const,
+    content: "x".repeat(200) + String(i),
+  }))
+  const snapshot = structuredClone(messages)
+  await collect(
+    run(messages, cfg({
+      provider: new MockProvider([{ content: "done" }], 100),
+      compactProvider: new MockProvider([{ content: "SUM" }]),
+      compactThreshold: 0.1,
+      keepRecent: 2,
+    })),
+  )
+  expect(messages).toEqual(snapshot)
 })
 
 test("skips compaction when under threshold", async () => {

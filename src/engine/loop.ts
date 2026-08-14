@@ -39,7 +39,7 @@ function mergeRules(base: PermissionRules, extra?: PermissionRules): PermissionR
   }
 }
 
-export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<EngineEvent> {
+export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncIterable<EngineEvent> {
   const { provider, registry, cwd, model, maxSteps } = cfg
   const mode = cfg.mode ?? "build"
   const policy = modePolicy(mode)
@@ -49,9 +49,10 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
   const limit = provider.contextWindow
   const threshold = cfg.compactThreshold ?? 0.8
   const keepRecent = cfg.keepRecent ?? 6
+  let working = messages.slice()
 
   if (store && !cfg.resume) {
-    store.create({ id: sessionId, cwd, model, provider: provider.id, createdAt: new Date().toISOString() }, messages)
+    store.create({ id: sessionId, cwd, model, provider: provider.id, createdAt: new Date().toISOString() }, working)
   } else if (store && cfg.resume) {
     const persisted = store.load(sessionId).messages
     for (const m of messages.slice(persisted.length)) store.append(sessionId, m)
@@ -71,20 +72,23 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
 
       if (cfg.compactProvider) {
         try {
-          const did = await maybeCompact(messages, {
+          const compacted = await maybeCompact(working, {
             provider: cfg.compactProvider,
             threshold,
             keepRecent,
             limit,
           })
-          if (did) yield { type: "contextUpdate", used: budgetUsed(messages), limit, pct: budgetPct(messages, limit) }
+          if (compacted) {
+            working = compacted
+            yield { type: "contextUpdate", used: budgetUsed(working), limit, pct: budgetPct(working, limit) }
+          }
         } catch {
           // skip compaction; continue with truncation-only
         }
       }
 
       const toolDefs = advertiseTools(registry, mode)
-      const prompt = assemblePrompt(messages, mode, cfg.skills ?? [])
+      const prompt = assemblePrompt(working, mode, cfg.skills ?? [])
       const stream = provider.stream(prompt, toolDefs, { signal: cfg.signal })
 
       let content: string | null = null
@@ -97,12 +101,12 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
         } else if (ev.type === "done") content = ev.content
       }
 
-      messages.push({ role: "assistant", content, toolCalls: calls.length > 0 ? calls : undefined })
-      store?.append(sessionId, messages[messages.length - 1])
+      working.push({ role: "assistant", content, toolCalls: calls.length > 0 ? calls : undefined })
+      store?.append(sessionId, working[working.length - 1])
 
       if (calls.length === 0) {
         result = content ?? ""
-        yield { type: "contextUpdate", used: budgetUsed(messages), limit, pct: budgetPct(messages, limit) }
+        yield { type: "contextUpdate", used: budgetUsed(working), limit, pct: budgetPct(working, limit) }
         yield { type: "turnComplete", step: steps }
         break
       }
@@ -143,13 +147,13 @@ export async function* run(messages: Message[], cfg: RunConfig): AsyncIterable<E
 
       for (const call of calls) {
         const toolResult = results.get(call.id)!
-        messages.push({ role: "tool", toolCallId: call.id, name: call.name, result: toolResult })
-        store?.append(sessionId, messages[messages.length - 1])
+        working.push({ role: "tool", toolCallId: call.id, name: call.name, result: toolResult })
+        store?.append(sessionId, working[working.length - 1])
         yield { type: "toolResult", id: call.id, name: call.name, result: toolResult }
       }
 
       steps++
-      yield { type: "contextUpdate", used: budgetUsed(messages), limit, pct: budgetPct(messages, limit) }
+      yield { type: "contextUpdate", used: budgetUsed(working), limit, pct: budgetPct(working, limit) }
       yield { type: "turnComplete", step: steps }
     }
 
