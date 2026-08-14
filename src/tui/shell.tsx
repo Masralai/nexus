@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Box, Text, useApp, useInput } from "ink"
+import { Box, useApp, useInput, useStdout } from "ink"
 import { randomUUID } from "node:crypto"
 import {
   applyPresetToConfig,
@@ -14,31 +14,36 @@ import type { Message } from "../engine/types"
 import type { AgentMode } from "../engine/mode"
 import { PRESETS, getPreset, otherPreset } from "../providers/presets"
 import { discoverSkills, findSkill, type Skill } from "../skills"
+import { Composer } from "./composer"
+import { Header } from "./header"
 import { LineInput } from "./line-input"
+import { PermissionGate } from "./permission-gate"
 import { Picker } from "./picker"
+import { initialChrome, present, reduceChrome, streamRows, windowStream } from "./present"
 import { HELP, filterSlashCommands, parseSlash, parseSlashArgs } from "./slash"
+import { Stream } from "./stream"
 import { reduceEvent, initialTUIState, settleTurnView } from "./state"
 import type { TUIState } from "./state"
-import { formatTranscript } from "./transcript"
+import { theme } from "./theme"
 
 type Overlay =
   | null
   | { kind: "picker"; title: string; items: { id: string; label: string }[]; then: (id: string) => void }
   | { kind: "line"; label: string; mask?: boolean; then: (v: string) => void }
-  | { kind: "permission"; title: string; resolve: (ok: boolean) => void }
+  | { kind: "permission"; name: string; reason: string; input: unknown; resolve: (ok: boolean) => void }
 
 export function Shell() {
   const { exit } = useApp()
+  const { stdout } = useStdout()
   const store = useRef(new JSONLStore()).current
   const [sessionId, setSessionId] = useState(String(randomUUID()))
   const [messages, setMessages] = useState<Message[]>([])
   const [created, setCreated] = useState(false)
-  const [input, setInput] = useState("")
+  const [chrome, setChrome] = useState(initialChrome)
   const [busy, setBusy] = useState(false)
-  const [view, setView] = useState<TUIState>(() => initialTUIState(loadConfig().model || "?"))
+  const [live, setLive] = useState<TUIState>(() => initialTUIState(loadConfig().model || "?"))
   const [overlay, setOverlay] = useState<Overlay>(null)
   const [log, setLog] = useState<string[]>([])
-  const [slashIdx, setSlashIdx] = useState(0)
   const [mode, setMode] = useState<AgentMode>("build")
   const [activeSkills, setActiveSkills] = useState<Skill[]>([])
   const acRef = useRef<AbortController | null>(null)
@@ -46,8 +51,27 @@ export function Shell() {
   const pushLog = (line: string) => setLog((l) => [...l, line])
 
   const needKey = !hasResolvableKey()
-  const slashMatches = filterSlashCommands(input)
-  const slashOpen = !overlay && !busy && input.startsWith("/")
+  const slashMatches = filterSlashCommands(chrome.input)
+  const slashOpen = !overlay && !busy && chrome.input.startsWith("/")
+  const cols = stdout?.columns ?? 80
+  const rows = stdout?.rows ?? 24
+  const HEADER_ROWS = 3
+  const COMPOSER_ROWS = 3
+  const streamH = Math.max(4, rows - HEADER_ROWS - COMPOSER_ROWS)
+  const t = theme()
+
+  const shown = present({
+    messages,
+    live,
+    sessionId,
+    mode,
+    skillNames: activeSkills.map((s) => s.name),
+    connected: hasResolvableKey(),
+    busy,
+    overlay: overlay?.kind ?? null,
+    chrome,
+    log,
+  })
 
   useEffect(() => {
     if (needKey) startKeyFlow()
@@ -79,7 +103,7 @@ export function Shell() {
                       applyPresetToConfig(preset)
                       setOverlay(null)
                       pushLog(`connected: ${preset.id}`)
-                      setView((s) => ({ ...s, status: { ...s.status, model: loadConfig().model || "?" } }))
+                      setLive((s) => ({ ...s, status: { ...s.status, model: loadConfig().model || "?" } }))
                     },
                   })
                 },
@@ -104,7 +128,10 @@ export function Shell() {
             applyPresetToConfig(preset)
             setOverlay(null)
             pushLog(`connected: ${preset.label}`)
-            setView((s) => ({ ...s, status: { ...s.status, model: loadConfig().model || preset.suggestedModels[0] || "?" } }))
+            setLive((s) => ({
+              ...s,
+              status: { ...s.status, model: loadConfig().model || preset.suggestedModels[0] || "?" },
+            }))
           },
         })
       },
@@ -128,7 +155,7 @@ export function Shell() {
               saveConfig({ model: m.trim() })
               setOverlay(null)
               pushLog(`model: ${m.trim()}`)
-              setView((s) => ({ ...s, status: { ...s.status, model: m.trim() } }))
+              setLive((s) => ({ ...s, status: { ...s.status, model: m.trim() } }))
             },
           })
           return
@@ -136,7 +163,7 @@ export function Shell() {
         saveConfig({ model: id })
         setOverlay(null)
         pushLog(`model: ${id}`)
-        setView((s) => ({ ...s, status: { ...s.status, model: id } }))
+        setLive((s) => ({ ...s, status: { ...s.status, model: id } }))
       },
     })
   }
@@ -217,7 +244,8 @@ export function Shell() {
         setCreated(true)
         setOverlay(null)
         setLog([])
-        setView(initialTUIState(loaded.meta.model))
+        setChrome(initialChrome())
+        setLive(initialTUIState(loaded.meta.model))
       },
     })
   }
@@ -231,7 +259,7 @@ export function Shell() {
     const nextMsgs = [...messages, { role: "user" as const, content: userText }]
     setMessages(nextMsgs)
     setBusy(true)
-    setView(initialTUIState(loadConfig().model || "?"))
+    setLive(initialTUIState(loadConfig().model || "?"))
     const ac = new AbortController()
     acRef.current = ac
     const runtime = launchRuntime({ store })
@@ -252,7 +280,9 @@ export function Shell() {
           new Promise<boolean>((resolve) => {
             setOverlay({
               kind: "permission",
-              title: `Allow ${req.name}? ${req.reason}`,
+              name: req.name,
+              reason: req.reason,
+              input: req.input,
               resolve: (ok) => {
                 setOverlay(null)
                 resolve(ok)
@@ -260,14 +290,14 @@ export function Shell() {
             })
           }),
       })) {
-        setView((s) => reduceEvent(s, ev))
+        setLive((s) => reduceEvent(s, ev))
         if (ev.type === "runComplete" || ev.type === "aborted" || ev.type === "error") {
           try {
             setMessages(store.load(sessionId).messages)
           } catch {
             /* first create race */
           }
-          setView((s) => settleTurnView(s, ev))
+          setLive((s) => settleTurnView(s, ev))
         }
       }
     } finally {
@@ -301,7 +331,8 @@ export function Shell() {
       setCreated(false)
       setActiveSkills([])
       setLog([])
-      setView(initialTUIState(loadConfig().model || "?"))
+      setChrome(initialChrome())
+      setLive(initialTUIState(loadConfig().model || "?"))
     } else pushLog(`unknown command: /${cmd} — type / for options`)
   }
 
@@ -314,83 +345,115 @@ export function Shell() {
       } else exit()
       return
     }
+
+    const page = Math.max(1, Math.floor(streamH / 2))
+    const contentLength = streamRows(shown.stream, cols)
+    if (key.pageUp || (key.ctrl && (ch === "u" || ch === "\x15"))) {
+      setChrome((c) =>
+        reduceChrome(c, {
+          type: "pageUp",
+          page,
+          contentLength,
+          viewHeight: streamH,
+        }),
+      )
+      return
+    }
+    if (key.pageDown || (key.ctrl && (ch === "d" || ch === "\x04"))) {
+      setChrome((c) =>
+        reduceChrome(c, {
+          type: "pageDown",
+          page,
+          contentLength,
+          viewHeight: streamH,
+        }),
+      )
+      return
+    }
+
     if (busy) return
 
     if (slashOpen && slashMatches.length > 0) {
       if (key.upArrow) {
-        setSlashIdx((i) => (i - 1 + slashMatches.length) % slashMatches.length)
+        setChrome((c) => reduceChrome(c, { type: "slashPrev", count: slashMatches.length }))
         return
       }
       if (key.downArrow) {
-        setSlashIdx((i) => (i + 1) % slashMatches.length)
+        setChrome((c) => reduceChrome(c, { type: "slashNext", count: slashMatches.length }))
         return
       }
       if (key.escape) {
-        setInput("")
-        setSlashIdx(0)
+        setChrome((c) => reduceChrome(c, { type: "clear" }))
         return
       }
       if (key.return) {
-        const pick = slashMatches[slashIdx] ?? slashMatches[0]
-        setInput("")
-        setSlashIdx(0)
+        const pick = slashMatches[chrome.slashIdx] ?? slashMatches[0]
+        setChrome((c) => reduceChrome(c, { type: "clear" }))
         if (pick) handleSlash(`/${pick.id}`)
         return
       }
     }
 
     if (key.return) {
-      const line = input.trim()
-      setInput("")
-      setSlashIdx(0)
-      if (!line) return
-      if (line.startsWith("/")) handleSlash(line)
-      else void runTurnUi(line)
+      const line = chrome.input.trim()
+      if (line.startsWith("/")) {
+        setChrome((c) => reduceChrome(c, { type: "clear" }))
+        if (line) handleSlash(line)
+        return
+      }
+      setChrome((c) => reduceChrome(c, { type: "commitUser" }))
+      if (line) void runTurnUi(line)
       return
     }
-    if (key.backspace || key.delete) {
-      setInput((v) => v.slice(0, -1))
-      setSlashIdx(0)
+    if (key.escape) {
+      setChrome((c) => reduceChrome(c, { type: "clear" }))
       return
     }
-    if (key.ctrl || key.meta || key.upArrow || key.downArrow) return
-    if (ch) {
-      setInput((v) => v + ch)
-      setSlashIdx(0)
+    if (key.leftArrow) {
+      setChrome((c) => reduceChrome(c, { type: "left" }))
+      return
     }
+    if (key.rightArrow) {
+      setChrome((c) => reduceChrome(c, { type: "right" }))
+      return
+    }
+    if (key.upArrow) {
+      setChrome((c) => reduceChrome(c, { type: "historyPrev" }))
+      return
+    }
+    if (key.downArrow) {
+      setChrome((c) => reduceChrome(c, { type: "historyNext" }))
+      return
+    }
+    if (key.backspace) {
+      setChrome((c) => reduceChrome(c, { type: "backspace" }))
+      return
+    }
+    if (key.delete) {
+      setChrome((c) => reduceChrome(c, { type: "delete" }))
+      return
+    }
+    if (key.ctrl || key.meta) return
+    if (ch) setChrome((c) => reduceChrome(c, { type: "insert", ch }))
   })
 
-  const model = loadConfig().model || "?"
-  const pct = view.status.limit ? `${(view.status.pct * 100).toFixed(0)}%` : "0%"
-  const transcript = formatTranscript(messages)
-  const skillLabel = activeSkills.length ? ` · skills ${activeSkills.map((s) => s.name).join("+")}` : ""
+  const windowed = windowStream(shown.stream, {
+    cols,
+    height: streamH,
+    offset: shown.viewportOffset,
+    followTail: shown.followTail,
+  })
 
   return (
-    <Box flexDirection="column">
-      {transcript.slice(-80).map((l, i) => (
-        <Text key={`t${i}`}>{l}</Text>
-      ))}
-      {busy ? (
-        <>
-          {view.lines.map((l, i) => (
-            <Text key={`v${i}`}>{l}</Text>
-          ))}
-          {view.assistantOutput ? <Text>{view.assistantOutput}</Text> : null}
-        </>
-      ) : null}
-      {log.slice(-20).map((l, i) => (
-        <Text key={`l${i}`} dimColor>
-          {l}
-        </Text>
-      ))}
-      {view.error ? <Text color="red">error: {view.error}</Text> : null}
-      {view.aborted ? <Text color="yellow">aborted</Text> : null}
-
+    <Box flexDirection="column" width={cols}>
+      <Header header={shown.header} cols={cols} t={t} />
+      <Stream blocks={windowed} height={streamH} busy={busy} t={t} />
       <Box marginTop={1}>
         {overlay?.kind === "picker" ? (
           <Picker
             title={overlay.title}
             items={overlay.items}
+            selectedColor={t.gold}
             onSelect={(id) => overlay.then(id)}
             onCancel={() => setOverlay(null)}
           />
@@ -402,53 +465,22 @@ export function Shell() {
             onCancel={() => setOverlay(null)}
           />
         ) : overlay?.kind === "permission" ? (
-          <Picker
-            title={overlay.title}
-            items={[
-              { id: "yes", label: "Approve" },
-              { id: "no", label: "Deny" },
-            ]}
-            onSelect={(id) => overlay.resolve(id === "yes")}
-            onCancel={() => overlay.resolve(false)}
+          <PermissionGate
+            name={overlay.name}
+            reason={overlay.reason}
+            input={overlay.input}
+            onResolve={overlay.resolve}
           />
         ) : (
-          <Box flexDirection="column">
-            <Text>
-              {busy ? (
-                <Text dimColor>… running (Ctrl+C abort)</Text>
-              ) : (
-                <Text>
-                  {"> "}
-                  {input}
-                  <Text dimColor>█</Text>
-                </Text>
-              )}
-            </Text>
-            {slashOpen ? (
-              <Box flexDirection="column" marginTop={1}>
-                {slashMatches.length === 0 ? (
-                  <Text dimColor>no matching commands</Text>
-                ) : (
-                  slashMatches.map((c, i) => (
-                    <Text key={c.id} color={i === slashIdx ? "cyan" : undefined}>
-                      {i === slashIdx ? "❯ " : "  "}/{c.id}
-                      <Text dimColor>  {c.hint}</Text>
-                    </Text>
-                  ))
-                )}
-                <Text dimColor>↑↓ select · Enter run · Esc clear</Text>
-              </Box>
-            ) : null}
-          </Box>
+          <Composer
+            mode={shown.composer.mode}
+            value={shown.composer.value}
+            cursor={shown.composer.cursor}
+            busy={shown.composer.busy}
+            slashIdx={shown.composer.slashIdx}
+            t={t}
+          />
         )}
-      </Box>
-
-      <Box marginTop={1}>
-        <Text dimColor>
-          session {sessionId.slice(0, 8)} · {mode} · {model}{skillLabel} · ctx {view.status.used}/{view.status.limit} ({pct}) · steps{" "}
-          {view.status.steps}
-          {!hasResolvableKey() ? " · not connected" : ""}
-        </Text>
       </Box>
     </Box>
   )

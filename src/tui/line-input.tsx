@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { Box, Text, useInput } from "ink"
+import { theme } from "./theme"
 
 export function LineInput(props: {
   label: string
@@ -29,15 +30,16 @@ export function LineInput(props: {
   })
 
   const shown = props.mask ? "•".repeat(value.length) : value
+  const t = theme()
 
   return (
     <Box flexDirection="column">
       <Text>
-        {props.label}
-        <Text color="cyan">{shown}</Text>
-        <Text dimColor>█</Text>
+        <Text color={t.bone}>{props.label}</Text>
+        <Text color={t.gold}>{shown}</Text>
+        <Text color={t.gold}>█</Text>
       </Text>
-      <Text dimColor>Enter confirm · Esc cancel</Text>
+      <Text color={t.boneDim}>Enter confirm · Esc cancel</Text>
     </Box>
   )
 }

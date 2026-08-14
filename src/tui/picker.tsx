@@ -1,5 +1,6 @@
 import React, { useState } from "react"
 import { Box, Text, useInput } from "ink"
+import { theme } from "./theme"
 
 export interface PickerItem {
   id: string
@@ -11,6 +12,7 @@ export function Picker(props: {
   items: PickerItem[]
   onSelect: (id: string) => void
   onCancel?: () => void
+  selectedColor?: string
 }) {
   const [idx, setIdx] = useState(0)
   const n = Math.max(props.items.length, 1)
@@ -26,16 +28,25 @@ export function Picker(props: {
     else if (key.return && props.items[idx]) props.onSelect(props.items[idx].id)
   })
 
+  const t = theme()
+  const themed = props.selectedColor !== undefined
+  const selected = props.selectedColor ?? "cyan"
   return (
     <Box flexDirection="column">
-      <Text bold>{props.title}</Text>
+      {props.title ? (
+        <Text color={themed ? t.bone : undefined} bold>
+          {props.title}
+        </Text>
+      ) : null}
       {props.items.map((it, i) => (
-        <Text key={it.id} color={i === idx ? "cyan" : undefined}>
+        <Text key={it.id} color={i === idx ? selected : themed ? t.boneDim : undefined}>
           {i === idx ? "❯ " : "  "}
           {it.label}
         </Text>
       ))}
-      <Text dimColor>↑↓ select · Enter confirm · Esc cancel</Text>
+      <Text color={themed ? t.boneDim : undefined} dimColor={!themed}>
+        ↑↓ select · Enter confirm · Esc cancel
+      </Text>
     </Box>
   )
 }
