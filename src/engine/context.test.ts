@@ -5,10 +5,11 @@ import { approxTokens, assemblePrompt, maybeCompact, truncate, workingMemory } f
 import type { Message } from "./types"
 import type { Skill } from "../skills"
 
-test("decide: default asks on bash, allows the rest", () => {
+test("decide: default asks mutators, allows readonly in cwd", () => {
   const rules: PermissionRules = {}
   expect(decide(rules, "bash", "ls")).toBe("ask")
-  expect(decide(rules, "read", "x")).toBe("allow")
+  expect(decide(rules, "write", "x")).toBe("ask")
+  expect(decide(rules, "read", "x", { readonly: true })).toBe("allow")
 })
 
 test("decide: deny wins over allow, patterns beat tool lists", () => {
@@ -19,7 +20,7 @@ test("decide: deny wins over allow, patterns beat tool lists", () => {
   }
   expect(decide(rules, "bash", "rm -rf /")).toBe("deny")
   expect(decide(rules, "bash", "ls")).toBe("allow")
-  expect(decide(rules, "read", "x")).toBe("deny")
+  expect(decide(rules, "read", "x", { readonly: true })).toBe("deny")
 })
 
 test("decide: askTools forces a prompt", () => {
@@ -71,7 +72,7 @@ test("decide: plan denyTools blocks write/edit/bash", () => {
   expect(decide(rules, "write", "x")).toBe("deny")
   expect(decide(rules, "edit", "x")).toBe("deny")
   expect(decide(rules, "bash", "ls")).toBe("deny")
-  expect(decide(rules, "read", "x")).toBe("allow")
+  expect(decide(rules, "read", "x", { readonly: true })).toBe("allow")
 })
 
 test("assemblePrompt prepends working memory and truncates tool output", () => {

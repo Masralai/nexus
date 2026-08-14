@@ -29,7 +29,7 @@ export interface Tool {
   name: string
   description: string
   schema: unknown
-  /** When true, safe to run in parallel and allowed in plan agent mode. */
+  /** When true, a Readonly tool: parallel-safe, advertised in plan, auto-allowed by the Permission gate inside cwd. */
   readonly?: boolean
   execute(input: unknown, ctx: ToolContext): Promise<ToolResult>
 }

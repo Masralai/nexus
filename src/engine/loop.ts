@@ -134,6 +134,11 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
 
       const grants = new Map<string, boolean>()
       for (const call of calls) {
+        const tool = registry.get(call.name)
+        if (!tool) {
+          grants.set(call.id, true)
+          continue
+        }
         const askEvents: { id: string; name: string; input: unknown; reason: string }[] = []
         const granted = await gateToolCall({
           rules,
@@ -141,6 +146,8 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
           name: call.name,
           input: call.input,
           reason: reasonForCall(call.name, call.input),
+          readonly: isReadonlyTool(tool),
+          cwd,
           askPermission: cfg.askPermission,
           autoApprove: cfg.autoApprove,
           onAsk: (req) => askEvents.push(req),

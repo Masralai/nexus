@@ -40,10 +40,15 @@ test("executes tool call then completes", async () => {
     { content: "ok" },
   ])
   const evts = await collect(
-    run([{ role: "user", content: "do it" }], cfg({ provider, registry: new Map([["echo", echo]]) })),
+    run([{ role: "user", content: "do it" }], cfg({
+      provider,
+      registry: new Map([["echo", echo]]),
+      autoApprove: true,
+    })),
   )
   expect(evts.map((e) => e.type)).toEqual([
     "toolCallStarted",
+    "permissionRequest",
     "toolResult",
     "contextUpdate",
     "turnComplete",
@@ -62,7 +67,12 @@ test("stops at maxSteps", async () => {
     { toolCalls: [{ id: "c3", name: "echo", input: {} }] },
   ])
   const evts = await collect(
-    run([{ role: "user", content: "go" }], cfg({ provider, registry: new Map([["echo", echo]]), maxSteps: 2 })),
+    run([{ role: "user", content: "go" }], cfg({
+      provider,
+      registry: new Map([["echo", echo]]),
+      maxSteps: 2,
+      autoApprove: true,
+    })),
   )
   expect(evts.filter((e) => e.type === "toolCallStarted")).toHaveLength(2)
   expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 2, result: "" })
@@ -92,7 +102,13 @@ test("persists every turn and replays losslessly", async () => {
   const store = new JSONLStore(dir)
   const provider = new MockProvider([{ toolCalls: [{ id: "c1", name: "echo", input: {} }] }, { content: "ok" }])
   const messages: Message[] = [{ role: "user", content: "go" }]
-  await collect(run(messages, cfg({ provider, registry: new Map([["echo", echo]]), store, sessionId: "s1" })))
+  await collect(run(messages, cfg({
+    provider,
+    registry: new Map([["echo", echo]]),
+    store,
+    sessionId: "s1",
+    autoApprove: true,
+  })))
   const loaded = store.load("s1")
   expect(loaded.status).toBe("done")
   expect(loaded.messages).toEqual([
@@ -146,6 +162,27 @@ test("runs reads in parallel, mutators sequentially", async () => {
     "bash",
   ])
   expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 1, result: "done" })
+})
+
+test("asks write without approval", async () => {
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "w1", name: "write", input: { path: "x", content: "y" } }] },
+    { content: "ok" },
+  ])
+  const write: Tool = { ...echo, name: "write", readonly: false }
+  const evts = await collect(
+    run([{ role: "user", content: "write it" }], cfg({
+      provider,
+      registry: new Map([["write", write]]),
+    })),
+  )
+  expect(evts.some((e) => e.type === "permissionRequest")).toBe(true)
+  expect(evts.find((e) => e.type === "toolResult")).toEqual({
+    type: "toolResult",
+    id: "w1",
+    name: "write",
+    result: { ok: false, output: "", error: "permission denied" },
+  })
 })
 
 test("denies bash without approval", async () => {
