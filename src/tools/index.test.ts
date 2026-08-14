@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { bash, edit, glob, grep, read, write, defaultTools } from "./index"
+import { bash, edit, glob, grep, list, read, write, defaultTools } from "./index"
 import type { ToolContext } from "../engine/types"
 
 let n = 0
@@ -69,9 +69,29 @@ test("grep finds matches with file:line", async () => {
   expect(r.output).toBe("a.txt:1:needle here")
 })
 
-test("default tools mark read/glob/grep readonly", () => {
+test("list names files and marks directories", async () => {
+  const dir = tmp()
+  writeFileSync(join(dir, "a.txt"), "")
+  mkdirSync(join(dir, "sub"))
+  const r = await list.execute({}, ctx(dir))
+  expect(r.ok).toBe(true)
+  expect(r.output.split("\n").sort()).toEqual(["a.txt", "sub/"])
+})
+
+test("list respects path and errors on missing dir", async () => {
+  const dir = tmp()
+  mkdirSync(join(dir, "sub"))
+  writeFileSync(join(dir, "sub", "b.txt"), "")
+  const ok = await list.execute({ path: "sub" }, ctx(dir))
+  expect(ok.output).toBe("b.txt")
+  const missing = await list.execute({ path: "nope" }, ctx(dir))
+  expect(missing.ok).toBe(false)
+})
+
+test("default tools mark read/glob/grep/list readonly", () => {
   const byName = Object.fromEntries(defaultTools().map((t) => [t.name, t.readonly]))
   expect(byName.read).toBe(true)
+  expect(byName.list).toBe(true)
   expect(byName.glob).toBe(true)
   expect(byName.grep).toBe(true)
   expect(byName.write).toBe(false)

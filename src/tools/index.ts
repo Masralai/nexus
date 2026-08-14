@@ -65,7 +65,8 @@ export const edit: Tool = {
 
 export const bash: Tool = {
   name: "bash",
-  description: "Run a shell command in the working directory. Input: { command }.",
+  description:
+    "Run a shell command in the working directory. Do not use for listing or reading files; use list, glob, read, grep. Input: { command }.",
   schema: {
     type: "object",
     properties: { command: { type: "string" } },
@@ -80,6 +81,25 @@ export const bash: Tool = {
     } catch (e) {
       const err = e as { stdout?: string; stderr?: string; message?: string }
       return { ok: false, output: cap(`${err.stdout ?? ""}${err.stderr ?? ""}`), error: err.message }
+    }
+  },
+}
+
+export const list: Tool = {
+  name: "list",
+  description: "List files and directories in a path. Prefer this over bash ls. Input: { path? }.",
+  schema: { type: "object", properties: { path: { type: "string" } } },
+  readonly: true,
+  async execute(input, ctx) {
+    const { path } = (input ?? {}) as { path?: string }
+    const dir = resolve(ctx.cwd, path ?? ".")
+    try {
+      const lines = readdirSync(dir, { withFileTypes: true })
+        .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
+        .sort()
+      return { ok: true, output: cap(lines.join("\n")) }
+    } catch (e) {
+      return { ok: false, output: "", error: e instanceof Error ? e.message : String(e) }
     }
   },
 }
@@ -138,7 +158,7 @@ function walk(root: string, fn: (file: string) => void): void {
 }
 
 export function defaultTools(): Tool[] {
-  return [read, write, edit, bash, glob, grep]
+  return [read, write, edit, bash, glob, grep, list]
 }
 
 /** @deprecated Prefer tool.readonly / isReadonlyTool — kept for any external imports. */
