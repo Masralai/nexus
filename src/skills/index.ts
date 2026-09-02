@@ -122,3 +122,14 @@ export function findSkill(skills: Skill[], query: string): Skill | undefined {
   const q = query.toLowerCase()
   return skills.find((s) => s.id.toLowerCase() === q || s.name.toLowerCase() === q)
 }
+
+export function filterSkills(skills: Skill[], query: string): Skill[] {
+  const q = query.trim().toLowerCase()
+  if (!q) return skills
+  return skills.filter(
+    (s) =>
+      s.id.toLowerCase().includes(q) ||
+      s.name.toLowerCase().includes(q) ||
+      s.description.toLowerCase().includes(q),
+  )
+}

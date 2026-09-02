@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { discoverSkills, findSkill, loadSkill, parseSkillMarkdown, formatSkillsPrompt } from "./index"
+import { discoverSkills, findSkill, filterSkills, loadSkill, parseSkillMarkdown, formatSkillsPrompt } from "./index"
 
 function skillDir(root: string, id: string, md: string): string {
   const dir = join(root, id)
@@ -77,6 +77,16 @@ test("findSkill matches id or name", () => {
   expect(findSkill(skills, "ponytail")?.id).toBe("ponytail")
   expect(findSkill(skills, "Test Driven")?.id).toBe("tdd")
   expect(findSkill(skills, "missing")).toBeUndefined()
+})
+
+test("filterSkills matches id name or description", () => {
+  const skills = [
+    { id: "ponytail", name: "ponytail", description: "be lazy", body: "", path: "/x" },
+    { id: "tdd", name: "Test Driven", description: "red green", body: "", path: "/y" },
+  ]
+  expect(filterSkills(skills, "lazy").map((s) => s.id)).toEqual(["ponytail"])
+  expect(filterSkills(skills, "driven").map((s) => s.id)).toEqual(["tdd"])
+  expect(filterSkills(skills, "")).toHaveLength(2)
 })
 
 test("loadSkill reads a skill directory", () => {
