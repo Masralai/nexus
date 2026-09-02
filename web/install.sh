@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${NEXUS_INSTALL_REPO:-unknown/nexus}"
+REPO="${NEXUS_INSTALL_REPO:-masralai/nexus}"
 BIN_DIR="${HOME}/.local/bin"
 ARCH="$(uname -m)"
 

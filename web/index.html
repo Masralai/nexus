@@ -466,7 +466,7 @@
 
             <div class="codebox">
               <span class="prompt" aria-hidden="true">$</span>
-              <pre class="code" id="codeEl"><code>curl -fsSL https://nexus.dev/install.sh | bash</code></pre>
+              <pre class="code" id="codeEl"><code>curl -fsSL https://raw.githubusercontent.com/masralai/nexus/main/web/install.sh | bash</code></pre>
               <button class="copy" id="copyBtn" type="button">Copy</button>
             </div>
 
@@ -500,9 +500,9 @@
 
     <script>
       const cmds = {
-        curl: "curl -fsSL https://nexus.dev/install.sh | bash",
+        curl: "curl -fsSL https://raw.githubusercontent.com/masralai/nexus/main/web/install.sh | bash",
         bun:  "bunx nexus --version  # or: bun install && bun run src/cli/main.ts",
-        ps1:  "# irm https://nexus.dev/install.ps1 | iex  # coming soon"
+        ps1:  "# irm https://raw.githubusercontent.com/masralai/nexus/main/web/install.ps1 | iex  # coming soon"
       };
       const labels = {
         curl: "LINUX · macOS · BUN",
