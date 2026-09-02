@@ -1,6 +1,6 @@
 {
-  "name": "nexus",
-  "version": "0.1.0",
+  "name": "@nexus-runner/harness",
+  "version": "1.0.0",
   "type": "module",
   "bin": {
     "nexus": "src/cli/main.ts"

@@ -1,6 +1,6 @@
 # Nexus
 
-BYOK coding agent for the terminal — interactive chat shell, one-shot runs, and resumable sessions. Bring your own API key; Nexus talks OpenAI-compatible APIs and Anthropic.
+BYOK agent for the terminal - interactive chat shell, one-shot runs, and resumable sessions.
 
 ## Features
 
@@ -54,7 +54,9 @@ nexus self-test [--model <m>]
 |---|---|
 | `/key` | Connect provider + API key |
 | `/model` | Pick or enter a model id |
-| `/skill` | Activate a skill (picker); `/skill <name>` · `/skill clear` |
+| `/skill` | Activate a skill (searchable picker); `/skill <name>` · `/skill clear` |
+| `/skills` | Same as `/skill` — searchable skill picker |
+| `/{skill-id}` | Activate a skill directly when id/name matches |
 | `/plan` | Read-only agent mode |
 | `/build` | Full tools mode |
 | `/resume` | Continue a past session |
