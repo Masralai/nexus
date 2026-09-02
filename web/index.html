@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Nexus — Your coding agent. Bring your own key.</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #08080a;
+        --panel: #111113;
+        --line: #232326;
+        --line-2: #1a1a1d;
+        --text: #e6edf3;
+        --muted: #9198a1;
+        --muted-2: #6e7681;
+        --gold: #58a6ff;
+        --gold-dim: #1e3a6b;
+        --bone: #e6edf3;
+        --crimson: #f85149;
+      }
+      * { box-sizing: border-box; }
+      html { scrollbar-width: none; -ms-overflow-style: none; scrollbar-gutter: auto; }
+      html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; width:0; height:0; }
+      html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+      body {
+        margin: 0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        overflow: hidden;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+      /* strict no-scroll — viewport fit */
+      .shell { overflow: hidden; }
+      *::-webkit-scrollbar { display:none; width:0; height:0; }
+      *{ scrollbar-width: none; -ms-overflow-style: none; }
+      a { color: inherit; text-decoration: none; }
+      /* faint grid — softened to frame live window */
+      .grid {
+        position: fixed; inset: 0; pointer-events: none; z-index: 0;
+        background:
+          linear-gradient(to right, rgba(255,255,255,0.035) 1px, transparent 1px) 0 0 / 72px 72px,
+          linear-gradient(to bottom, rgba(255,255,255,0.03) 1px, transparent 1px) 0 0 / 72px 72px;
+        mask-image: linear-gradient(to bottom, transparent 0%, black 14%, black 62%, transparent 88%);
+        opacity: 0.22;
+      }
+      /* live terminal window — accurate TUI from image.png */
+      .live {
+        width: min(560px, 42vw);
+        border: 1px solid var(--line);
+        background: #0a0a0a;
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow: 0 24px 64px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06), 0 8px 24px rgba(0,0,0,0.4);
+        transform: rotate(-0.12deg);
+        display: flex; flex-direction: column;
+        position: relative;
+        isolation: isolate;
+      }
+      .live::before {
+        content:"";
+        position:absolute; inset:-1px; border-radius: inherit; z-index:-1;
+        background: linear-gradient(135deg, rgba(255,255,255,0.06), transparent 48%);
+        opacity: 0.6; pointer-events:none;
+      }
+      .live-status {
+        display:flex; align-items:center; gap:0;
+        padding:7px 12px 7px;
+        background: #0a0a0a;
+        border-bottom:1px solid #1e1e20;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size:9.5px; letter-spacing:0.02em;
+        color: #8b949e;
+        white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+      }
+      .live-status b{ color:#c9d1d9; font-weight:600; }
+      .live-status .dot{ margin:0 7px; opacity:0.55; }
+      .live-body {
+        background:#0a0a0a;
+        padding:10px 12px 8px;
+        height: clamp(220px, 34vh, 312px); overflow:hidden;
+        scrollbar-width:none; -ms-overflow-style:none;
+      }
+      .live-body::-webkit-scrollbar{ display:none; width:0; height:0; }
+      .live-pre { scrollbar-width:none; }
+      .live-pre::-webkit-scrollbar{ display:none; }
+      .live-pre {
+        margin:0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size:11px; line-height:1.55; white-space:pre-wrap; word-break:break-word;
+        letter-spacing:0; color:#c9d1d9;
+      }
+      .live-pre .u { color:#58a6ff; }
+      .live-pre .you { color:#58a6ff; }
+      .live-pre .mut { color:#8b949e; }
+      .live-pre .b { color:#e6edf3; }
+      .live-pre .err { color:#f85149; }
+      .live-pre .dim { color:#8b949e; }
+      .live-pre .arrow { color:#58a6ff; }
+      .live-pre .tool { color:#c9d1d9; }
+      .live-pre .hl-perm { display:inline; }
+      .live-prompt{
+        display:flex; align-items:center; gap:6px;
+        padding:10px 12px 12px;
+        background:#0a0a0a; border-top:1px solid transparent;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size:11px; line-height:1;
+        color:#58a6ff;
+      }
+      .live-prompt .mode{ color:#58a6ff; }
+      .live-prompt .sep{ color:#58a6ff; opacity:1; }
+      .live-prompt .cursor-blk{
+        width:7px; height:13px; background:#58a6ff; display:inline-block;
+        animation: blinkBlk 1s step-end infinite; vertical-align:middle;
+      }
+      @keyframes blinkBlk{ 0%,50%{opacity:1} 51%,100%{opacity:0} }
+      @keyframes blink{ 0%,50%{opacity:1} 51%,100%{opacity:0} }
+      .shell {
+        position: relative; z-index: 1;
+        height: 100vh;
+        height: 100dvh;
+        overflow: hidden;
+        display: flex; flex-direction: column;
+      }
+      .top {
+        position: fixed; top: 0; left: 0; right: 0; z-index: 5;
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 18px 28px;
+        font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+        color: var(--muted);
+        background: linear-gradient(to bottom, rgba(8,8,10,0.92) 60%, transparent);
+        backdrop-filter: blur(2px);
+      }
+      .brand {
+        display: flex; align-items: center; gap: 10px;
+        color: var(--text); letter-spacing: 0.02em; text-transform: none;
+      }
+      .brand-mark {
+        width: 22px; height: 22px; border-radius: 4px;
+        background: var(--gold);
+        color: #0a0a0a;
+        display: grid; place-items: center;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-weight: 800; font-size: 12px; line-height: 1;
+        border: 1px solid rgba(255,255,255,0.08);
+      }
+      .brand-name { font-weight: 700; letter-spacing: -0.03em; font-size: 14px; }
+      .brand-sub { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted-2); margin-left: 2px; }
+      .top-links { display: flex; align-items: center; gap: 18px; }
+      .top-links a { color: var(--muted); transition: color .15s; }
+      .top-links a:hover { color: var(--text); }
+      .top-links .ext::after { content: " ↗"; font-size: 10px; opacity: 0.55; }
+
+      /* rail — sessions stack, not icons */
+      .rail {
+        position: fixed; left: 18px; top: 50%; transform: translateY(-50%);
+        z-index: 4; width: 64px;
+        border: 1px solid var(--line-2);
+        background: rgba(14,14,16,0.88);
+        backdrop-filter: blur(8px);
+        display: flex; flex-direction: column;
+      }
+      .rail-head {
+        padding: 8px 8px 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 7.5px; letter-spacing: 0.14em; text-transform: uppercase;
+        color: var(--muted-2);
+        border-bottom: 1px solid var(--line-2);
+        display: flex; justify-content: space-between;
+      }
+      .rail a {
+        display: flex; flex-direction: column; gap: 2px;
+        padding: 9px 8px;
+        border-bottom: 1px solid var(--line-2);
+        transition: background .15s;
+      }
+      .rail a:last-child { border-bottom: 0; }
+      .rail a:hover { background: rgba(255,255,255,0.04); }
+      .rail a b {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 7px; color: var(--muted-2); font-weight: 500; letter-spacing: 0.06em;
+      }
+      .rail a span {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 8.5px; line-height: 1.2; color: #c9c9cf;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .rail a em {
+        font-style: normal; font-size: 7px; color: var(--muted-2);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .rail a.active { border-left: 2px solid var(--gold); padding-left: 6px; }
+      .rail-foot {
+        padding: 6px 8px; text-align: center;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 7px; letter-spacing: 0.08em; color: var(--muted-2);
+        border-top: 1px solid var(--line-2);
+      }
+
+      .hero-wrap {
+        flex: 1;
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(520px, 640px) minmax(380px, 560px);
+        gap: 32px;
+        align-items: center;
+        justify-content: center;
+        padding: 88px 28px 16px;
+        width: min(1280px, 100%);
+        margin: 0 auto;
+        padding-left: clamp(96px, 9vw, 108px);
+        overflow: hidden;
+      }
+      .hero {
+        width: 100%;
+        max-width: 640px;
+        margin-left: 0;
+      }
+      /* anchor live to same grid rhythm */
+      .hero-wrap .live { justify-self: start; align-self: center; }
+      .eyebrow {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+        color: var(--muted-2);
+        margin: 0 0 16px;
+        display: flex; align-items: center; gap: 10px;
+      }
+      .eyebrow::before {
+        content: "";
+        width: 22px; height: 1px; background: var(--line);
+        display: inline-block;
+      }
+      .eyebrow b { color: var(--muted); font-weight: 600; }
+      h1 {
+        margin: 0;
+        font-size: clamp(2.55rem, 5.6vw, 4.15rem);
+        line-height: 0.92;
+        letter-spacing: -0.05em;
+        font-weight: 700;
+      }
+      h1 .l1 { color: var(--bone); display: block; }
+      h1 .l2 { color: var(--gold); display: block; }
+      .desc {
+        margin: 16px 0 0;
+        max-width: 36.5rem;
+        color: var(--muted);
+        font-size: 13.25px;
+        line-height: 1.68;
+      }
+      .desc strong { color: var(--bone); font-weight: 600; }
+
+      .install { margin-top: 28px; }
+      .tabs {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 12px; margin-bottom: 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+      }
+      .tabs-left { display: flex; gap: 14px; flex-wrap: wrap; }
+      .tab {
+        background: none; border: 0; padding: 6px 2px;
+        color: var(--muted-2); cursor: pointer;
+        border-bottom: 1px solid transparent;
+        letter-spacing: 0.12em; text-transform: uppercase;
+        font: inherit; transition: color .15s, border-color .15s;
+      }
+      .tab[aria-selected="true"] { color: var(--bone); border-color: var(--gold); }
+      .tab:hover { color: var(--bone); }
+      .tab:disabled { opacity: 0.38; cursor: default; }
+      .tabs-right { color: var(--muted-2); font-size: 9px; letter-spacing: 0.12em; white-space: nowrap; }
+      .codebox {
+        display: flex; align-items: stretch;
+        border: 1px solid var(--line);
+        background: #0d0d0f;
+      }
+      .prompt {
+        display: grid; place-items: center;
+        padding: 0 12px;
+        color: var(--gold);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px; border-right: 1px solid var(--line);
+        user-select: none;
+      }
+      .code {
+        flex: 1; margin: 0; padding: 14px 14px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12.5px; line-height: 1.4;
+        color: var(--bone); overflow: hidden; white-space: nowrap;
+        scrollbar-width:none;
+      }
+      .code::-webkit-scrollbar{ display:none; }
+      .copy {
+        border: 0; border-left: 1px solid var(--line);
+        background: transparent; color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+        padding: 0 16px; cursor: pointer; transition: color .15s, background .15s;
+        white-space: nowrap;
+      }
+      .copy:hover { color: var(--bone); background: rgba(255,255,255,0.04); }
+      .copy.copied { color: var(--gold); }
+      .hint {
+        margin: 10px 0 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 10.5px; line-height: 1.6; color: var(--muted-2);
+      }
+      .hint code { color: #b8b8c0; }
+      .hint a { color: var(--gold); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: rgba(88,166,255,0.35); }
+      .hint a:hover { text-decoration-color: var(--gold); }
+
+      .compat {
+        margin-top: 20px;
+        display: flex; flex-wrap: wrap; align-items: center; gap: 8px 8px;
+      }
+      .compat-label {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+        color: var(--muted-2); margin-right: 4px;
+      }
+      .pill {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 5px 8px;
+        border: 1px solid var(--line);
+        background: rgba(17,17,19,0.9);
+        color: var(--muted);
+        font-size: 11px; letter-spacing: 0.01em;
+        border-radius: 999px;
+      }
+      .pill i { width: 13px; height: 13px; border-radius: 50%; display: grid; place-items: center; font-size: 7px; font-weight: 800; flex: none; }
+      .pill--openai i { background: #0a0a0a; color: var(--bone); border: 1px solid #2a2a30; }
+      .pill--anthropic i { background: #d4a27f; color: #1a0f0a; }
+      .pill--gemini i { background: #4285f4; color: white; }
+      .pill--mut { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: #c9c9cf; }
+      .pill--ok { border-color: rgba(88,166,255,0.28); }
+      .pill--ask { border-color: rgba(248,81,73,0.28); }
+
+      .below {
+        display: none;
+        position: relative; z-index: 1;
+        border-top: 1px solid var(--line-2);
+        background: linear-gradient(180deg, rgba(8,8,10,0) 0%, rgba(13,13,15,0.96) 18%, #0d0d0f 100%);
+        padding: 26px 28px 30px;
+      }
+      .below-inner {
+        width: min(980px, 92vw);
+        margin-left: clamp(82px, 14vw, 216px);
+        display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 18px;
+      }
+      .card {
+        border: 1px solid var(--line-2);
+        background: #0f0f11;
+        padding: 16px 16px;
+      }
+      .card h2 {
+        margin: 0 0 8px;
+        font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+        color: var(--muted); font-weight: 650;
+        display: flex; align-items: center; gap: 8px;
+      }
+      .card h2::before { content: ""; width: 8px; height: 8px; background: var(--gold); display: inline-block; }
+      .card h2.alt::before { background: var(--muted-2); }
+      .card p, .card li { font-size: 12.5px; line-height: 1.6; color: var(--muted); }
+      .card ul { margin: 6px 0 0 16px; padding: 0; }
+      .card pre {
+        margin: 10px 0 0;
+        background: #08080a;
+        border: 1px solid var(--line-2);
+        padding: 10px 12px;
+        overflow: hidden;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11.5px; line-height: 1.5; color: var(--bone);
+        scrollbar-width:none;
+      }
+      .card pre::-webkit-scrollbar{ display:none; }
+      .k { color: var(--gold); }
+      .slash { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+      .slash dt { color: var(--gold); }
+      .slash dd { margin: 0; color: var(--muted); }
+
+      .foot {
+        position: relative; z-index: 1;
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 14px 28px 16px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+        color: var(--muted-2);
+        border-top: 1px solid var(--line-2);
+        background: #08080a;
+        gap: 12px; flex-wrap: wrap;
+      }
+      .foot-left { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+      .foot-mark { width: 14px; height: 14px; display: grid; place-items: center; border: 1px solid var(--line); background: var(--gold); color: #0a0a0a; font-size: 8px; font-weight: 800; }
+
+      @media (max-width: 1100px) {
+        .hero-wrap{
+          grid-template-columns: 1fr 420px;
+          gap: 24px;
+          padding-left: clamp(82px, 14vw, 96px);
+        }
+        .live{ width: 100%; min-width: 0; }
+      }
+      @media (max-width: 900px) {
+        .rail { display: none; }
+        .below { display: none; }
+        .top { padding: 14px 16px; }
+        .hero-wrap {
+          grid-template-columns: 1fr;
+          padding: 84px 16px 16px;
+          width: 100%;
+          padding-left: 16px;
+          gap: 22px;
+          overflow: hidden;
+        }
+        .hero-wrap .live{ order:2; width:100%; max-width:none; transform:none; justify-self: stretch; }
+        .live-body{ height: clamp(200px, 36vh, 260px); }
+        .foot { padding: 12px 16px; }
+      }
+      @media (max-width: 520px) {
+        h1 { font-size: 2.35rem; }
+        .tabs { flex-direction: column; align-items: stretch; }
+        .tabs-right { display: none; }
+        .code { font-size: 11px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="grid" aria-hidden="true"></div>
+
+    <div class="shell">
+      <nav class="top" aria-label="Top">
+        <a class="brand" href="#" aria-label="Nexus home">
+          <span class="brand-mark">η</span>
+          <span class="brand-name">Nexus</span>
+        </a>
+        <div class="top-links">
+          <a href="https://github.com/masralai/nexus" class="ext">GitHub</a>
+        </div>
+      </nav>
+
+      
+
+      <div class="hero-wrap" id="hero">
+        <main class="hero">
+          <p class="eyebrow"><b>Session</b> · <b>Turn</b> · <b>Provider</b> — BYOK</p>
+          <h1>
+            <span class="l1">Your coding agent.</span>
+            <span class="l2">Bring your own key.</span>
+          </h1>
+          <p class="desc">
+            Interactive chat shell, one-shot runs, and resumable sessions — provider-agnostic.
+          </p>
+
+          <div class="install" aria-label="Install">
+            <div class="tabs">
+              <div class="tabs-left" role="tablist" aria-label="Install method">
+                <button class="tab" role="tab" aria-selected="true" data-key="curl">CURL</button>
+                <button class="tab" role="tab" aria-selected="false" data-key="bun">BUN</button>
+                <button class="tab" role="tab" aria-selected="false" data-key="ps1">PS1</button>
+              </div>
+              <span class="tabs-right" id="platformLabel">LINUX · macOS · BUN</span>
+            </div>
+
+            <div class="codebox">
+              <span class="prompt" aria-hidden="true">$</span>
+              <pre class="code" id="codeEl"><code>curl -fsSL https://nexus.dev/install.sh | bash</code></pre>
+              <button class="copy" id="copyBtn" type="button">Copy</button>
+            </div>
+
+          </div>
+        </main>
+
+        <aside class="live live--tui" aria-label="Terminal session preview">
+          <div class="live-status" id="liveStatus">SESSION <b>d222caae</b><span class="dot">·</span>MODE <b id="liveMode">build</b><span class="dot">·</span>MODEL <b>gemini-2.5-flash</b><span class="dot">·</span>CTX <b>618/128000 (0%)</b><span class="dot">·</span>steps <b>2</b></div>
+          <div class="live-body" id="liveBody">
+            <pre class="live-pre" id="livePre" aria-live="polite"><span class="you">you</span> create web.txt with "hello nexus"
+<span class="arrow">▶</span> <span class="tool">write {"path":"web.txt","content":"hello nexus\n"}</span>
+<span class="dim">  ok wrote web.txt (12 bytes)</span>
+<span class="you">you</span> add a heading to it
+<span class="arrow">▶</span> <span class="tool">read {"path":"web.txt"}</span>
+<span class="dim">  ok hello nexus</span>
+<span class="arrow">▶</span> <span class="tool">edit {"path":"web.txt","oldString":"hello nexus","newString":"# hello nexus"}</span>
+<span class="dim">  ok edited web.txt</span>
+<span class="b">Done — updated web.txt. Session d222caae → ~/.nexus/sessions/</span></pre>
+          </div>
+          <div class="live-prompt" aria-hidden="true"><span class="mode" id="livePromptMode">build</span><span class="sep"> › </span><span class="cursor-blk"></span></div>
+        </aside>
+      </div>
+
+      
+
+      <footer class="foot">
+        <span class="foot-left"><span class="foot-mark">η</span> NEXUS — BYOK · Sessions on disk </span>
+        <span>© 2026 Nexus </span>
+      </footer>
+    </div>
+
+    <script>
+      const cmds = {
+        curl: "curl -fsSL https://nexus.dev/install.sh | bash",
+        bun:  "bunx nexus --version  # or: bun install && bun run src/cli/main.ts",
+        ps1:  "# irm https://nexus.dev/install.ps1 | iex  # coming soon"
+      };
+      const labels = {
+        curl: "LINUX · macOS · BUN",
+        bun:  "ANY · BUN",
+        ps1:  "WINDOWS · SOON"
+      };
+      const tabs = document.querySelectorAll(".tab");
+      const codeEl = document.getElementById("codeEl");
+      const platEl = document.getElementById("platformLabel");
+      const btn = document.getElementById("copyBtn");
+      tabs.forEach(t => t.addEventListener("click", () => {
+        tabs.forEach(x => x.setAttribute("aria-selected","false"));
+        t.setAttribute("aria-selected","true");
+        const k = t.dataset.key;
+        codeEl.textContent = cmds[k];
+        platEl.textContent = labels[k];
+      }));
+      btn.addEventListener("click", async () => {
+        const text = codeEl.textContent.trim();
+        try { await navigator.clipboard.writeText(text); } catch {
+          const ta = document.createElement("textarea"); ta.value=text; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
+        }
+        const prev = btn.textContent;
+        btn.textContent = "Copied"; btn.classList.add("copied");
+        setTimeout(()=>{ btn.textContent = prev; btn.classList.remove("copied"); }, 1200);
+      });
+
+      // build-mode demo is static — subtle prompt blink handled by CSS .cursor-blk
+    </script>
+  </body>
+</html>
