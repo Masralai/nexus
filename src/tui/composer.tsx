@@ -9,6 +9,7 @@ export function Composer({
   cursor,
   busy,
   slashIdx,
+  scrollable,
   t,
 }: {
   mode: AgentMode
@@ -16,6 +17,7 @@ export function Composer({
   cursor: number
   busy: boolean
   slashIdx: number
+  scrollable?: boolean
   t: Theme
 }) {
   if (busy) {
@@ -53,6 +55,9 @@ export function Composer({
           )}
           <Text color={t.boneDim}>↑↓ select · Enter run · Esc clear</Text>
         </Box>
+      ) : null}
+      {scrollable ? (
+        <Text color={t.boneDim}>scroll: wheel · Ctrl+U/D</Text>
       ) : null}
     </Box>
   )

@@ -7,7 +7,7 @@ export interface SlashCommand {
 export const SLASH_COMMANDS: SlashCommand[] = [
   { id: "key", hint: "connect provider + API key" },
   { id: "model", hint: "set model" },
-  { id: "skill", hint: "activate a skill from ~/.agents" },
+  { id: "skill", hint: "activate a skill" },
   { id: "plan", hint: "read-only plan mode" },
   { id: "build", hint: "full tools build mode" },
   { id: "resume", hint: "continue a past session" },

@@ -14,12 +14,15 @@ import type { Message } from "../engine/types"
 import type { AgentMode } from "../engine/mode"
 import { PRESETS, getPreset, otherPreset } from "../providers/presets"
 import { discoverSkills, findSkill, type Skill } from "../skills"
+import { copyToClipboard } from "./clipboard"
 import { Composer } from "./composer"
 import { Header } from "./header"
 import { LineInput } from "./line-input"
+import { disableMouse, enableMouse, parseMouseEvent } from "./mouse"
 import { PermissionGate } from "./permission-gate"
 import { Picker } from "./picker"
-import { initialChrome, present, reduceChrome, streamRows, windowStream } from "./present"
+import { extractSelection, initialChrome, present, reduceChrome, screenRows, streamRows, windowStream } from "./present"
+import type { SelectionAnchor } from "./present"
 import { HELP, filterSlashCommands, parseSlash, parseSlashArgs } from "./slash"
 import { Stream } from "./stream"
 import { reduceEvent, initialTUIState, settleTurnView } from "./state"
@@ -28,7 +31,13 @@ import { theme } from "./theme"
 
 type Overlay =
   | null
-  | { kind: "picker"; title: string; items: { id: string; label: string }[]; then: (id: string) => void }
+  | {
+      kind: "picker"
+      title: string
+      items: { id: string; label: string; searchText?: string }[]
+      searchable?: boolean
+      then: (id: string) => void
+    }
   | { kind: "line"; label: string; mask?: boolean; then: (v: string) => void }
   | { kind: "permission"; name: string; reason: string; input: unknown; resolve: (ok: boolean) => void }
 
@@ -47,6 +56,9 @@ export function Shell() {
   const [mode, setMode] = useState<AgentMode>("build")
   const [activeSkills, setActiveSkills] = useState<Skill[]>([])
   const acRef = useRef<AbortController | null>(null)
+  const [selAnchor, setSelAnchor] = useState<SelectionAnchor | undefined>()
+  const [selActive, setSelActive] = useState<SelectionAnchor | undefined>()
+  const selDragging = useRef(false)
 
   const pushLog = (line: string) => setLog((l) => [...l, line])
 
@@ -77,6 +89,25 @@ export function Shell() {
     if (needKey) startKeyFlow()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    if (!stdout) return
+    enableMouse(stdout)
+    return () => disableMouse(stdout)
+  }, [stdout])
+
+  function pageScroll(dir: "up" | "down") {
+    const page = Math.max(1, Math.floor(streamH / 2))
+    const contentLength = streamRows(shown.stream, cols)
+    setChrome((c) =>
+      reduceChrome(c, {
+        type: dir === "up" ? "pageUp" : "pageDown",
+        page,
+        contentLength,
+        viewHeight: streamH,
+      }),
+    )
+  }
 
   function startKeyFlow() {
     setOverlay({
@@ -182,13 +213,20 @@ export function Shell() {
       pushLog("no skills found (~/.agents/skills, ~/.claude/skills, ~/.cursor/skills-cursor, .agents/skills)")
       return
     }
+    const activeIds = new Set(activeSkills.map((s) => s.id))
     setOverlay({
       kind: "picker",
-      title: "Activate skill (/skill)",
+      title: `Activate skill (${activeIds.size} active)`,
+      searchable: true,
       items: [
         ...catalog.map((s) => ({
           id: s.id,
-          label: s.description ? `${s.name} — ${s.description.slice(0, 60)}` : s.name,
+          label: activeIds.has(s.id)
+            ? `${s.name} ✓${s.description ? ` — ${s.description.slice(0, 50)}` : ""}`
+            : s.description
+              ? `${s.name} — ${s.description.slice(0, 60)}`
+              : s.name,
+          searchText: `${s.id} ${s.name} ${s.description} ${s.path}`,
         })),
         ...(activeSkills.length ? [{ id: "__clear__", label: "Clear active skills" }] : []),
       ],
@@ -317,7 +355,7 @@ export function Shell() {
     else if (cmd === "quit" || cmd === "exit") exit()
     else if (cmd === "key") startKeyFlow()
     else if (cmd === "model") startModelFlow()
-    else if (cmd === "skill") handleSkillCommand(parseSlashArgs(raw))
+    else if (cmd === "skill" || cmd === "skills") handleSkillCommand(parseSlashArgs(raw))
     else if (cmd === "resume") startResumeFlow()
     else if (cmd === "plan") {
       setMode("plan")
@@ -333,10 +371,78 @@ export function Shell() {
       setLog([])
       setChrome(initialChrome())
       setLive(initialTUIState(loadConfig().model || "?"))
-    } else pushLog(`unknown command: /${cmd} — type / for options`)
+    } else {
+      const skill = findSkill(discoverSkills(), cmd)
+      if (skill) activateSkill(skill)
+      else pushLog(`unknown command: /${cmd} — type / for options`)
+    }
   }
 
   useInput((ch, key) => {
+    const mouse = parseMouseEvent(ch)
+
+    // Wheel scroll
+    if (mouse?.type === "wheel") {
+      if (mouse.button === 4) pageScroll("up")
+      else pageScroll("down")
+      return
+    }
+
+    // Mouse press (left button)
+    if (mouse?.type === "press" && mouse.button === 0) {
+      const contentLength = streamRows(shown.stream, cols)
+      const maxRow = Math.max(0, contentLength - 1)
+      const row = Math.max(0, Math.min(maxRow, mouse.row))
+      const col = Math.max(0, mouse.col)
+      selDragging.current = true
+      setSelAnchor({ row, col })
+      setSelActive({ row, col })
+      return
+    }
+
+    // Mouse drag (left button held)
+    if (mouse?.type === "drag" && mouse.button === 0 && selDragging.current) {
+      const contentLength = streamRows(shown.stream, cols)
+      const maxRow = Math.max(0, contentLength - 1)
+      const row = Math.max(0, Math.min(maxRow, mouse.row))
+      const col = Math.max(0, mouse.col)
+      setSelActive({ row, col })
+      return
+    }
+
+    // Mouse release (left button)
+    if (mouse?.type === "release" && mouse.button === 0 && selDragging.current) {
+      selDragging.current = false
+      const contentLength = streamRows(shown.stream, cols)
+      const maxRow = Math.max(0, contentLength - 1)
+      const row = Math.max(0, Math.min(maxRow, mouse.row))
+      const col = Math.max(0, mouse.col)
+      const finalActive = { row, col }
+      setSelActive(finalActive)
+
+      // Copy selection if there is one
+      setSelAnchor((anchor) => {
+        if (anchor && stdout) {
+          const rows = screenRows(windowed, cols)
+          const text = extractSelection(rows, anchor, finalActive, cols)
+          if (text.length > 0) {
+            copyToClipboard(text, stdout)
+          }
+        }
+        return anchor
+      })
+      return
+    }
+
+    // Any other mouse event - clear selection and ignore
+    if (mouse) return
+
+    // Clear selection on keyboard input (except during scroll/copy)
+    if (selAnchor) {
+      setSelAnchor(undefined)
+      setSelActive(undefined)
+    }
+
     if (overlay) return
     if (key.ctrl && ch === "c") {
       if (busy && acRef.current) {
@@ -346,28 +452,18 @@ export function Shell() {
       return
     }
 
-    const page = Math.max(1, Math.floor(streamH / 2))
-    const contentLength = streamRows(shown.stream, cols)
     if (key.pageUp || (key.ctrl && (ch === "u" || ch === "\x15"))) {
-      setChrome((c) =>
-        reduceChrome(c, {
-          type: "pageUp",
-          page,
-          contentLength,
-          viewHeight: streamH,
-        }),
-      )
+      pageScroll("up")
       return
     }
     if (key.pageDown || (key.ctrl && (ch === "d" || ch === "\x04"))) {
-      setChrome((c) =>
-        reduceChrome(c, {
-          type: "pageDown",
-          page,
-          contentLength,
-          viewHeight: streamH,
-        }),
-      )
+      pageScroll("down")
+      return
+    }
+
+    // Shift+Tab: toggle plan/build mode (works even with text in input)
+    if (key.tab && key.shift && !busy && !overlay) {
+      setMode((m) => (m === "plan" ? "build" : "plan"))
       return
     }
 
@@ -434,9 +530,12 @@ export function Shell() {
       return
     }
     if (key.ctrl || key.meta) return
+    if (ch.startsWith("\x1b") || ch.startsWith("[<")) return
     if (ch) setChrome((c) => reduceChrome(c, { type: "insert", ch }))
   })
 
+  const contentLength = streamRows(shown.stream, cols)
+  const scrollable = contentLength > streamH
   const windowed = windowStream(shown.stream, {
     cols,
     height: streamH,
@@ -447,12 +546,13 @@ export function Shell() {
   return (
     <Box flexDirection="column" width={cols}>
       <Header header={shown.header} cols={cols} t={t} />
-      <Stream blocks={windowed} height={streamH} busy={busy} t={t} />
+      <Stream blocks={windowed} height={streamH} busy={busy} t={t} cols={cols} anchor={selAnchor} active={selActive} />
       <Box marginTop={1}>
         {overlay?.kind === "picker" ? (
           <Picker
             title={overlay.title}
             items={overlay.items}
+            searchable={overlay.searchable}
             selectedColor={t.gold}
             onSelect={(id) => overlay.then(id)}
             onCancel={() => setOverlay(null)}
@@ -478,6 +578,7 @@ export function Shell() {
             cursor={shown.composer.cursor}
             busy={shown.composer.busy}
             slashIdx={shown.composer.slashIdx}
+            scrollable={scrollable}
             t={t}
           />
         )}

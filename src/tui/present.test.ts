@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import type { Message } from "../engine/types"
 import { initialTUIState } from "./state"
-import { initialChrome, present, reduceChrome, streamRows, windowStream, type PresentInput } from "./present"
+import { initialChrome, present, reduceChrome, streamRows, windowStream, linesOf, type PresentInput } from "./present"
 
 function input(partial: Partial<PresentInput> = {}): PresentInput {
   return {
@@ -249,6 +249,31 @@ test("pageUp by half the stream height brings you back into the window", () => {
   expect(win[0]).toEqual({ kind: "user", text: "ask" })
 })
 
+test("pageUp through a long session reaches the oldest user message", () => {
+  const messages: Message[] = []
+  for (let i = 0; i < 8; i++) {
+    messages.push({ role: "user", content: `question ${i}` })
+    messages.push({ role: "assistant", content: `answer ${i} `.repeat(20) })
+  }
+  const blocks = present(input({ messages })).stream
+  const cols = 40
+  const height = 10
+  const total = streamRows(blocks, cols)
+  let chrome = initialChrome()
+  while (chrome.viewportOffset > 0 || chrome.followTail) {
+    chrome = reduceChrome(chrome, { type: "pageUp", page: height, contentLength: total, viewHeight: height })
+    if (chrome.viewportOffset === 0 && !chrome.followTail) break
+  }
+  const win = windowStream(blocks, { cols, height, offset: chrome.viewportOffset, followTail: chrome.followTail })
+  expect(win[0]).toEqual({ kind: "user", text: "question 0" })
+})
+
+test("stream row count matches flattened linesOf for wrapped assistant text", () => {
+  const blocks = [{ kind: "assistant" as const, text: "abcdefghijklmnopqrstuvwxy" }]
+  expect(streamRows(blocks, 10)).toBe(3)
+  const flat = blocks.flatMap((b) => linesOf(b, 10))
+  expect(flat).toHaveLength(3)
+})
 test("slash highlight wraps", () => {
   let c = reduceChrome(initialChrome(), { type: "slashNext", count: 3 })
   expect(c.slashIdx).toBe(1)

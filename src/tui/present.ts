@@ -307,7 +307,7 @@ function wrapLines(text: string, width: number): string[] {
   return lines.length > 0 ? lines : [""]
 }
 
-function linesOf(block: StreamBlock, cols: number): string[] {
+export function linesOf(block: StreamBlock, cols: number): string[] {
   const inner = Math.max(1, cols - USER_GUTTER)
   switch (block.kind) {
     case "splash":
@@ -386,5 +386,81 @@ export function windowStream(
     out.push(from === 0 && to === lines.length ? block : clipBlock(block, sliced))
   }
   return out
+}
+
+export interface SelectionAnchor {
+  row: number // screen row (0-indexed)
+  col: number // screen col (0-indexed)
+}
+
+export interface ScreenRow {
+  block: StreamBlock
+  line: string
+  index: number // screen row index
+}
+
+/** Map windowed blocks to flat screen rows. */
+export function screenRows(blocks: StreamBlock[], cols: number): ScreenRow[] {
+  const rows: ScreenRow[] = []
+  let idx = 0
+  for (const block of blocks) {
+    for (const line of linesOf(block, cols)) {
+      rows.push({ block, line, index: idx })
+      idx++
+    }
+  }
+  return rows
+}
+
+/** Clamp a screen row index to valid range. */
+export function clampRow(row: number, maxRow: number): number {
+  return Math.max(0, Math.min(maxRow, row))
+}
+
+/** Clamp a column index to valid range for a line. */
+export function clampCol(col: number, line: string): number {
+  return Math.max(0, Math.min(line.length, col))
+}
+
+/** Extract selected text from screen rows between two anchor points. */
+export function extractSelection(rows: ScreenRow[], anchor: SelectionAnchor, active: SelectionAnchor, cols: number): string {
+  const r0 = Math.min(anchor.row, active.row)
+  const r1 = Math.max(anchor.row, active.row)
+  const lines: string[] = []
+
+  for (const row of rows) {
+    if (row.index < r0 || row.index > r1) continue
+    const lineLen = row.line.length
+
+    let startCol: number
+    let endCol: number
+
+    if (r0 === r1) {
+      // Same row
+      startCol = Math.min(anchor.col, active.col)
+      endCol = Math.max(anchor.col, active.col)
+    } else if (row.index === r0) {
+      // First row: from anchor/start to end of line
+      startCol = anchor.row === r0 ? anchor.col : active.col
+      endCol = lineLen
+    } else if (row.index === r1) {
+      // Last row: from start to active/end col
+      endCol = active.row === r1 ? active.col : anchor.col
+      startCol = 0
+    } else {
+      // Middle row: full line
+      startCol = 0
+      endCol = lineLen
+    }
+
+    startCol = clampCol(startCol, row.line)
+    endCol = clampCol(endCol, row.line)
+
+    if (endCol > startCol) {
+      lines.push(row.line.slice(startCol, endCol))
+    }
+  }
+
+  return lines.join("\n")
 }
 
