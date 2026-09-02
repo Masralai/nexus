@@ -50,6 +50,12 @@ test("workingMemory includes chat guidance", () => {
   expect(workingMemory(msgs)).toContain("user declined")
 })
 
+test("workingMemory frames Nexus as a general assistant", () => {
+  const wm = workingMemory([{ role: "user", content: "hi" }])
+  expect(wm).toContain("capable assistant")
+  expect(wm).not.toContain("coding assistant")
+})
+
 test("workingMemory uses latest user message as task", () => {
   const msgs: Message[] = [
     { role: "user", content: "hello" },

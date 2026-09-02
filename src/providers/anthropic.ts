@@ -68,7 +68,7 @@ export class Anthropic implements Provider {
       headers: { "Content-Type": "application/json", "x-api-key": this.cfg.apiKey, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({
         model: this.cfg.model,
-        max_tokens: this.cfg.maxTokens ?? 4096,
+        ...(this.cfg.maxTokens ? { max_tokens: this.cfg.maxTokens } : {}),
         stream: true,
         tools: tools.length ? tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.schema })) : undefined,
         messages: toAnthropicMessages(messages),
