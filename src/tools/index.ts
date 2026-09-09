@@ -2,6 +2,10 @@ import { execSync } from "node:child_process"
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { dirname, join, relative, resolve } from "node:path"
 import type { Tool } from "../engine/types"
+import { apply_patch, undoLast } from "./patch"
+import { todowrite, todoread } from "./todo"
+import { question } from "./question"
+import { lsp } from "./lsp"
 
 const MAX_OUTPUT = 8000
 
@@ -228,8 +232,24 @@ function walk(root: string, fn: (file: string) => void): void {
   }
 }
 
+export { apply_patch } from "./patch"
+export { todowrite, todoread } from "./todo"
+export { question } from "./question"
+export { lsp } from "./lsp"
+
+export const undo: Tool = {
+  name: "undo",
+  description: "Undo last write/edit/apply_patch. Input: {}",
+  schema: { type: "object", properties: {} },
+  readonly: false,
+  async execute(_input, ctx) {
+    const r = undoLast(ctx.cwd)
+    return r.ok ? { ok: true, output: r.output } : { ok: false, output: "", error: r.error }
+  },
+}
+
 export function defaultTools(): Tool[] {
-  return [read, write, edit, bash, glob, grep, list]
+  return [read, write, edit, bash, glob, grep, list, apply_patch, undo, todowrite, todoread, question, lsp]
 }
 
 /** @deprecated Prefer tool.readonly / isReadonlyTool — kept for any external imports. */
