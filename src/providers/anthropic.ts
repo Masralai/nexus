@@ -62,8 +62,25 @@ export class Anthropic implements Provider {
     this.fetchImpl = cfg.fetchImpl ?? fetch
   }
 
+  private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+    const maxRetries = 1
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const res = await this.fetchImpl(url, init)
+      if (res.ok) return res
+      const retryable = res.status === 429 || res.status === 503 || res.status === 502
+      if (!retryable || attempt === maxRetries) {
+        throw new Error(`anthropic: HTTP ${res.status}: ${(await res.text()).slice(0, 500)}`)
+      }
+      const retryAfter = res.headers.get("retry-after")
+      const delayMs = retryAfter ? Number(retryAfter) * 1000 : 500 * Math.pow(2, attempt)
+      if (init.signal?.aborted) throw new Error("aborted")
+      await new Promise((r) => setTimeout(r, Math.min(delayMs, 5000)))
+    }
+    throw new Error("anthropic: retry exhausted")
+  }
+
   async *stream(messages: Message[], tools: ToolDefinition[], opts: StreamOptions): AsyncIterable<ProviderEvent> {
-    const res = await this.fetchImpl("https://api.anthropic.com/v1/messages", {
+    const res = await this.fetchWithRetry("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": this.cfg.apiKey, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({
@@ -75,7 +92,6 @@ export class Anthropic implements Provider {
       }),
       signal: opts.signal,
     })
-    if (!res.ok) throw new Error(`anthropic: HTTP ${res.status}: ${(await res.text()).slice(0, 500)}`)
 
     const toolAcc = new Map<number, { id?: string; name?: string; input: string }>()
     let content = ""
@@ -107,12 +123,19 @@ export class Anthropic implements Provider {
 
     const calls = [...toolAcc.entries()]
       .sort((a, b) => a[0] - b[0])
-      .map(([, a]) => ({ id: a.id ?? "", name: a.name ?? "", input: parseArgs(a.input) }))
-    if (stopReason === "tool_use" && calls.length > 0) {
+      .map(([, a]) => {
+        let parsed: unknown
+        try {
+          parsed = a.input ? JSON.parse(a.input) : {}
+        } catch {
+          parsed = a.input ? { _raw: a.input } : {}
+        }
+        return { id: a.id ?? "", name: a.name ?? "", input: parsed }
+      })
+      .filter((c) => c.name)
+    if (calls.length > 0) {
       for (const c of calls) yield { type: "toolCall", ...c }
-      yield { type: "done", content: content || null }
-    } else {
-      yield { type: "done", content: content || null }
     }
+    yield { type: "done", content: content || null }
   }
 }
