@@ -36,8 +36,17 @@ function runtime(over: {
 test("parseFlags strips --yes and --model", () => {
   expect(parseFlags(["--yes", "fix it", "--model", "gpt"])).toEqual({
     yes: true,
+    auto: false,
+    mode: undefined,
     model: "gpt",
     rest: ["fix it"],
+  })
+  expect(parseFlags(["--auto", "task", "--plan"])).toEqual({
+    yes: true,
+    auto: true,
+    mode: "plan",
+    model: undefined,
+    rest: ["task"],
   })
 })
 

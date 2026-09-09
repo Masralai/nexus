@@ -81,5 +81,6 @@ export async function* runTurn(opts: TurnOpts): AsyncIterable<EngineEvent> {
     compactProvider: rt.compactProvider,
     compactThreshold: opts.compactThreshold ?? rt.cfg.compactThreshold,
     askPermission: opts.askPermission,
+    rules: rt.cfg.permission,
   })
 }

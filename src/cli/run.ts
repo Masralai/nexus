@@ -5,12 +5,19 @@ import type { Provider } from "../providers/types"
 import { runTUI } from "../tui"
 import { launchRuntime, runTurn } from "./launch"
 
-export function parseFlags(argv: string[]): { yes: boolean; model?: string; rest: string[] } {
-  const yes = argv.includes("--yes")
+export function parseFlags(argv: string[]): { yes: boolean; auto?: boolean; mode?: "plan" | "build"; model?: string; rest: string[] } {
+  const yes = argv.includes("--yes") || argv.includes("--auto")
+  const auto = argv.includes("--auto")
+  const mode: "plan" | "build" | undefined = argv.includes("--plan") ? "plan" : argv.includes("--build") ? "build" : undefined
   const i = argv.indexOf("--model")
   const model = i >= 0 ? argv[i + 1] : undefined
-  const rest = argv.filter((a, idx) => a !== "--yes" && a !== "--model" && !(i >= 0 && idx === i + 1))
-  return { yes, model, rest }
+  const rest = argv.filter((a, idx) => {
+    if (a === "--yes" || a === "--auto" || a === "--plan" || a === "--build") return false
+    if (a === "--model") return false
+    if (i >= 0 && idx === i + 1) return false
+    return true
+  })
+  return { yes, auto, mode, model, rest }
 }
 
 /** @deprecated Prefer launchRuntime — kept for self-test and callers. */

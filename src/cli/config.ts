@@ -3,6 +3,7 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { getCredential } from "./credentials"
 import { getPreset, type Preset } from "../providers/presets"
+import type { PermissionRules } from "../engine/permission"
 
 export interface NexusConfig {
   provider: string
@@ -12,6 +13,7 @@ export interface NexusConfig {
   compactModel: string
   compactThreshold: number
   baseUrl?: string
+  permission?: PermissionRules
 }
 
 const DEFAULTS: NexusConfig = {
@@ -55,6 +57,8 @@ export function saveConfig(partial: Partial<NexusConfig>, path = defaultConfigPa
   }
   if ("baseUrl" in partial) next.baseUrl = partial.baseUrl
   else if (raw.baseUrl !== undefined) next.baseUrl = raw.baseUrl
+  if ("permission" in partial) (next as unknown as Record<string, unknown>).permission = partial.permission
+  else if ((raw as unknown as Record<string, unknown>).permission !== undefined) (next as unknown as Record<string, unknown>).permission = (raw as unknown as Record<string, unknown>).permission
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 })
 }
@@ -79,6 +83,7 @@ export function loadConfig(opts: { model?: string; file?: string } = {}): NexusC
     compactThreshold:
       num(process.env.NEXUS_COMPACT_THRESHOLD) ?? raw.compactThreshold ?? DEFAULTS.compactThreshold,
     baseUrl: process.env.OPENAI_BASE_URL ?? raw.baseUrl ?? fromPreset?.baseUrl,
+    permission: (raw as unknown as Record<string, unknown>).permission as PermissionRules | undefined,
   }
 }
 
