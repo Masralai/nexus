@@ -2,46 +2,150 @@ import { Box, Text } from "ink"
 import { linesOf, type StreamBlock, type ScreenRow } from "./present"
 import type { Theme } from "./theme"
 import type { SelectionAnchor } from "./present"
+import { assistantStyledRows, type Segment } from "./markdown"
 
-function inlineParts(text: string): { kind: "text" | "bold" | "code"; text: string }[] {
-  const parts: { kind: "text" | "bold" | "code"; text: string }[] = []
-  const re = /(\*\*[^*]+\*\*|`[^`]+`)/g
-  let last = 0
-  for (const m of text.matchAll(re)) {
-    if (m.index > last) parts.push({ kind: "text", text: text.slice(last, m.index) })
-    const raw = m[0]
-    if (raw.startsWith("**")) parts.push({ kind: "bold", text: raw.slice(2, -2) })
-    else parts.push({ kind: "code", text: raw.slice(1, -1) })
-    last = m.index + raw.length
-  }
-  if (last < text.length) parts.push({ kind: "text", text: text.slice(last) })
-  if (parts.length === 0) parts.push({ kind: "text", text })
-  return parts
+function renderSegments(
+  segments: Segment[],
+  defaultColor: string,
+  t: Theme,
+  isHeading: boolean,
+  isRule: boolean,
+  isQuote: boolean,
+) {
+  return segments.map((seg, i) => {
+    if (seg.kind === "bold") {
+      return (
+        <Text key={i} bold color={isQuote ? t.boneDim : defaultColor}>
+          {seg.text}
+        </Text>
+      )
+    }
+    if (seg.kind === "code") {
+      return (
+        <Text key={i} color={t.steel}>
+          {seg.text}
+        </Text>
+      )
+    }
+    if (seg.kind === "italic") {
+      return (
+        <Text key={i} dimColor color={defaultColor}>
+          {seg.text}
+        </Text>
+      )
+    }
+    if (seg.kind === "linkUrl") {
+      return (
+        <Text key={i} color={t.boneDim}>
+          {seg.text}
+        </Text>
+      )
+    }
+    // text
+    if (isRule) return (
+      <Text key={i} color={t.boneDim}>
+        {seg.text}
+      </Text>
+    )
+    if (isQuote) return (
+      <Text key={i} color={t.boneDim}>
+        {seg.text}
+      </Text>
+    )
+    if (isHeading) {
+      return (
+        <Text key={i} bold color={defaultColor}>
+          {seg.text}
+        </Text>
+      )
+    }
+    return <Text key={i}>{seg.text}</Text>
+  })
 }
 
-function Rich({ text, color, t }: { text: string; color: string; t: Theme }) {
-  return (
-    <Text color={color}>
-      {inlineParts(text).map((p, i) =>
-        p.kind === "bold" ? (
-          <Text key={i} bold>
-            {p.text}
-          </Text>
-        ) : p.kind === "code" ? (
-          <Text key={i} color={t.steel}>
-            {p.text}
-          </Text>
-        ) : (
-          <Text key={i}>{p.text}</Text>
-        ),
-      )}
-    </Text>
-  )
+function renderSegmentsWithSelection(
+  segments: Segment[],
+  selStart: number | undefined,
+  selEnd: number | undefined,
+  defaultColor: string,
+  t: Theme,
+  isHeading: boolean,
+  isRule: boolean,
+  isQuote: boolean,
+) {
+  const hasSel = selStart !== undefined && selEnd !== undefined && selEnd > selStart
+  if (!hasSel) {
+    return <Text color={defaultColor}>{renderSegments(segments, defaultColor, t, isHeading, isRule, isQuote)}</Text>
+  }
+  let pos = 0
+  const nodes: React.ReactNode[] = []
+  for (let idx = 0; idx < segments.length; idx++) {
+    const seg = segments[idx]!
+    const len = seg.text.length
+    const segStart = pos
+    const segEnd = pos + len
+    if (segEnd <= selStart || segStart >= selEnd) {
+      // no overlap
+      if (seg.kind === "bold") nodes.push(<Text key={`${idx}-n`} bold color={isQuote ? t.boneDim : defaultColor}>{seg.text}</Text>)
+      else if (seg.kind === "code") nodes.push(<Text key={`${idx}-n`} color={t.steel}>{seg.text}</Text>)
+      else if (seg.kind === "italic") nodes.push(<Text key={`${idx}-n`} dimColor color={defaultColor}>{seg.text}</Text>)
+      else if (seg.kind === "linkUrl") nodes.push(<Text key={`${idx}-n`} color={t.boneDim}>{seg.text}</Text>)
+      else {
+        const c = isRule || isQuote ? t.boneDim : defaultColor
+        const bold = isHeading
+        nodes.push(bold ? <Text key={`${idx}-n`} bold color={c}>{seg.text}</Text> : <Text key={`${idx}-n`} color={c}>{seg.text}</Text>)
+      }
+    } else {
+      const beforeLen = Math.max(0, selStart - segStart)
+      const selLen = Math.min(segEnd, selEnd) - Math.max(segStart, selStart)
+      const afterLen = len - beforeLen - selLen
+      const before = beforeLen > 0 ? seg.text.slice(0, beforeLen) : ""
+      const sel = seg.text.slice(beforeLen, beforeLen + selLen)
+      const after = afterLen > 0 ? seg.text.slice(beforeLen + selLen) : ""
+      if (before) {
+        if (seg.kind === "bold") nodes.push(<Text key={`${idx}-b`} bold color={isQuote ? t.boneDim : defaultColor}>{before}</Text>)
+        else if (seg.kind === "code") nodes.push(<Text key={`${idx}-b`} color={t.steel}>{before}</Text>)
+        else if (seg.kind === "italic") nodes.push(<Text key={`${idx}-b`} dimColor color={defaultColor}>{before}</Text>)
+        else if (seg.kind === "linkUrl") nodes.push(<Text key={`${idx}-b`} color={t.boneDim}>{before}</Text>)
+        else {
+          const c = isRule || isQuote ? t.boneDim : defaultColor
+          nodes.push(isHeading ? <Text key={`${idx}-b`} bold color={c}>{before}</Text> : <Text key={`${idx}-b`} color={c}>{before}</Text>)
+        }
+      }
+      if (sel) {
+        // selected piece: inverse, preserve original style plus inverse
+        if (seg.kind === "bold") nodes.push(<Text key={`${idx}-s`} bold inverse color={isQuote ? t.boneDim : defaultColor}>{sel}</Text>)
+        else if (seg.kind === "code") nodes.push(<Text key={`${idx}-s`} color={t.steel} inverse>{sel}</Text>)
+        else if (seg.kind === "italic") nodes.push(<Text key={`${idx}-s`} dimColor inverse color={defaultColor}>{sel}</Text>)
+        else if (seg.kind === "linkUrl") nodes.push(<Text key={`${idx}-s`} color={t.boneDim} inverse>{sel}</Text>)
+        else {
+          const c = isRule || isQuote ? t.boneDim : defaultColor
+          nodes.push(isHeading ? <Text key={`${idx}-s`} bold inverse color={c}>{sel}</Text> : <Text key={`${idx}-s`} inverse color={c}>{sel}</Text>)
+        }
+      }
+      if (after) {
+        if (seg.kind === "bold") nodes.push(<Text key={`${idx}-a`} bold color={isQuote ? t.boneDim : defaultColor}>{after}</Text>)
+        else if (seg.kind === "code") nodes.push(<Text key={`${idx}-a`} color={t.steel}>{after}</Text>)
+        else if (seg.kind === "italic") nodes.push(<Text key={`${idx}-a`} dimColor color={defaultColor}>{after}</Text>)
+        else if (seg.kind === "linkUrl") nodes.push(<Text key={`${idx}-a`} color={t.boneDim}>{after}</Text>)
+        else {
+          const c = isRule || isQuote ? t.boneDim : defaultColor
+          nodes.push(isHeading ? <Text key={`${idx}-a`} bold color={c}>{after}</Text> : <Text key={`${idx}-a`} color={c}>{after}</Text>)
+        }
+      }
+    }
+    pos += len
+  }
+  return <Text color={defaultColor}>{nodes}</Text>
 }
 
 function Row({
   block,
   line,
+  segments,
+  isHeading,
+  isRule,
+  isQuote,
   t,
   caret,
   selectionStart,
@@ -49,6 +153,10 @@ function Row({
 }: {
   block: StreamBlock
   line: string
+  segments?: Segment[]
+  isHeading?: boolean
+  isRule?: boolean
+  isQuote?: boolean
   t: Theme
   caret?: boolean
   selectionStart?: number
@@ -58,9 +166,9 @@ function Row({
 
   function renderWithSelection(text: string, color: string) {
     if (!hasSelection) return <Text color={color}>{text}</Text>
-    const before = text.slice(0, selectionStart)
-    const selected = text.slice(selectionStart, selectionEnd)
-    const after = text.slice(selectionEnd)
+    const before = text.slice(0, selectionStart!)
+    const selected = text.slice(selectionStart!, selectionEnd!)
+    const after = text.slice(selectionEnd!)
     return (
       <Text color={color}>
         {before && <Text>{before}</Text>}
@@ -88,13 +196,22 @@ function Row({
         </Text>
       )
     case "assistant":
-    case "live-assistant":
+    case "live-assistant": {
+      if (segments && segments.length > 0) {
+        return (
+          <Text>
+            {renderSegmentsWithSelection(segments, selectionStart, selectionEnd, t.bone, t, !!isHeading, !!isRule, !!isQuote)}
+            {caret ? <Text color={t.gold}>█</Text> : null}
+          </Text>
+        )
+      }
       return (
         <Text>
           {renderWithSelection(line, t.bone)}
           {caret ? <Text color={t.gold}>█</Text> : null}
         </Text>
       )
+    }
     case "fence":
       return (
         <Box paddingLeft={2}>
@@ -132,7 +249,16 @@ export function Stream({
   anchor?: SelectionAnchor
   active?: SelectionAnchor
 }) {
-  const rows = blocks.flatMap((block) => linesOf(block, cols).map((line) => ({ block, line })))
+  // Build visual rows: for assistant blocks use styled rows so segments stay in sync with plain lines
+  const rows: Array<{ block: StreamBlock; line: string; segments?: Segment[]; isHeading?: boolean; isRule?: boolean; isQuote?: boolean }> = []
+  for (const block of blocks) {
+    if (block.kind === "assistant" || block.kind === "live-assistant") {
+      const styled = assistantStyledRows(block.text, cols)
+      for (const sr of styled) rows.push({ block, line: sr.plain, segments: sr.segments, isHeading: sr.isHeading, isRule: sr.isRule, isQuote: sr.isQuote })
+    } else {
+      for (const line of linesOf(block, cols)) rows.push({ block, line })
+    }
+  }
   const last = rows.length - 1
 
   // Compute selection column range per screen row
@@ -174,6 +300,10 @@ export function Stream({
             key={`${r.block.kind}-${i}`}
             block={r.block}
             line={r.line}
+            segments={r.segments}
+            isHeading={r.isHeading}
+            isRule={r.isRule}
+            isQuote={r.isQuote}
             t={t}
             caret={busy && r.block.kind === "live-assistant" && i === last}
             selectionStart={selStart}

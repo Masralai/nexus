@@ -24,6 +24,20 @@ export interface LoadedSession {
   messages: Message[]
 }
 
+export function sessionTitle(messages: Message[]): string {
+  const firstUser = messages.find((m) => m.role === "user" && typeof (m as unknown as { content?: unknown }).content === "string" && ((m as unknown as { content: string }).content.trim().length > 0))
+  const rawCandidate: unknown = (firstUser as unknown as { content?: unknown })?.content ?? (messages[0] as unknown as { content?: unknown })?.content ?? ""
+  if (typeof rawCandidate !== "string") return ""
+  const firstLine = rawCandidate.split("\n")[0]?.trim() ?? ""
+  if (!firstLine) return ""
+  return firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine
+}
+
+export function sessionDisplayTitle(meta: SessionMeta, messages: Message[]): string {
+  const t = sessionTitle(messages)
+  return t || `${meta.id.slice(0, 8)}…`
+}
+
 export class JSONLStore {
   constructor(readonly dir: string = join(homedir(), ".nexus", "sessions")) {}
 
@@ -77,5 +91,18 @@ export class JSONLStore {
     } catch {
       return []
     }
+  }
+
+  listWithTitles(): Array<{ meta: SessionMeta; title: string; messages: Message[] }> {
+    return this.list()
+      .map((meta) => {
+        try {
+          const loaded = this.load(meta.id)
+          return { meta, messages: loaded.messages, title: sessionTitle(loaded.messages) || `${meta.id.slice(0, 8)}…` }
+        } catch {
+          return { meta, messages: [], title: `${meta.id.slice(0, 8)}…` }
+        }
+      })
+      .sort((a, b) => b.meta.createdAt.localeCompare(a.meta.createdAt))
   }
 }

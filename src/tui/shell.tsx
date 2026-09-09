@@ -263,7 +263,7 @@ export function Shell() {
   }
 
   function startResumeFlow() {
-    const sessions = store.list()
+    const sessions = store.listWithTitles()
     if (sessions.length === 0) {
       pushLog("no sessions to resume")
       return
@@ -271,9 +271,11 @@ export function Shell() {
     setOverlay({
       kind: "picker",
       title: "Resume session",
+      searchable: true,
       items: sessions.map((s) => ({
-        id: s.id,
-        label: `${s.id.slice(0, 8)}… ${s.model} ${s.createdAt}`,
+        id: s.meta.id,
+        label: s.title ? `${s.title} — ${s.meta.model} · ${s.meta.createdAt}` : `${s.meta.id.slice(0, 8)}… ${s.meta.model} ${s.meta.createdAt}`,
+        searchText: `${s.title} ${s.meta.id} ${s.meta.model} ${s.meta.createdAt}`,
       })),
       then: (id) => {
         const loaded = store.load(id)

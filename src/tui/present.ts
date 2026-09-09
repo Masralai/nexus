@@ -1,5 +1,6 @@
 import type { AgentMode } from "../engine/mode"
 import type { Message } from "../engine/types"
+import { assistantPlainLines } from "./markdown"
 
 export type StreamBlock =
   | { kind: "splash" }
@@ -316,6 +317,7 @@ export function linesOf(block: StreamBlock, cols: number): string[] {
       return wrapLines(block.text, inner)
     case "assistant":
     case "live-assistant":
+      return assistantPlainLines(block.text, Math.max(1, cols))
     case "log":
     case "error":
     case "live-line":

@@ -3,6 +3,8 @@ import { useEffect, useState } from "react"
 import type { EngineEvent } from "../engine/types"
 import { Picker } from "./picker"
 import { initialTUIState, reduceEvent, type PermissionRequest, type TUIState } from "./state"
+import { assistantStyledRows } from "./markdown"
+import { theme } from "./theme"
 
 export type TurnRunner = (
   emit: (ev: EngineEvent) => void,
@@ -62,6 +64,7 @@ export function LiveTurnView({
   }, [state.done, state.aborted, state.error, onDone])
 
   const pct = state.status.limit ? `${(state.status.pct * 100).toFixed(0)}%` : "0%"
+  const t = theme()
 
   return (
     <Box flexDirection="column">
@@ -69,7 +72,24 @@ export function LiveTurnView({
       {state.lines.map((l, i) => (
         <Text key={i}>{l}</Text>
       ))}
-      {state.assistantOutput ? <Text>{state.assistantOutput}</Text> : null}
+      {state.assistantOutput ? (
+        <Box flexDirection="column">
+          {assistantStyledRows(state.assistantOutput, 80).map((row, i) => (
+            <Text key={i} color={t.bone}>
+              {row.segments.map((seg, j) => {
+                if (seg.kind === "bold") return <Text key={j} bold>{seg.text}</Text>
+                if (seg.kind === "code") return <Text key={j} color={t.steel}>{seg.text}</Text>
+                if (seg.kind === "italic") return <Text key={j} dimColor>{seg.text}</Text>
+                if (seg.kind === "linkUrl") return <Text key={j} color={t.boneDim}>{seg.text}</Text>
+                if (row.isRule) return <Text key={j} color={t.boneDim}>{seg.text}</Text>
+                if (row.isQuote) return <Text key={j} color={t.boneDim}>{seg.text}</Text>
+                if (row.isHeading) return <Text key={j} bold>{seg.text}</Text>
+                return <Text key={j}>{seg.text}</Text>
+              })}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
       {state.permission && resolver ? (
         <Picker
           title={permissionTitle(state.permission)}
