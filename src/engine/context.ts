@@ -10,7 +10,12 @@ export function truncate(text: string, max = 4000): string {
 }
 
 export function approxTokens(m: Message): number {
-  const text = m.role === "tool" ? m.result.output + (m.result.error ?? "") : (m.content ?? "")
+  let text: string
+  if (m.role === "tool") text = m.result.output + (m.result.error ?? "")
+  else if (m.role === "assistant" && m.toolCalls?.length) {
+    const callsText = m.toolCalls.map((c) => `${c.name}:${JSON.stringify(c.input)}`).join("")
+    text = (m.content ?? "") + callsText
+  } else text = m.content ?? ""
   return Math.ceil(text.length / 4)
 }
 
@@ -24,6 +29,7 @@ export function workingMemory(
   messages: readonly Message[],
   mode: AgentMode = "build",
   skills: Skill[] = [],
+  repoMap?: string,
 ): string {
   const users = messages.filter((m) => m.role === "user")
   const task = users.at(-1)?.content ?? ""
@@ -34,12 +40,13 @@ export function workingMemory(
   const { guidance } = modePolicy(mode)
   const skillBlock = formatSkillsPrompt(skills)
   const skillsSection = skillBlock ? `\n\n${skillBlock}` : ""
+  const mapSection = repoMap ? `\n\n${repoMap}` : ""
   return `[working-memory]
-${GUIDANCE}${guidance}${skillsSection}
+ ${GUIDANCE}${guidance}${skillsSection}${mapSection}
 
-task: ${task.slice(0, 300)}
-recent:
-${recent}`
+ task: ${task.slice(0, 300)}
+ recent:
+ ${recent}`
 }
 
 export function budgetUsed(messages: readonly Message[]): number {
@@ -58,9 +65,10 @@ export function assemblePrompt(
   messages: readonly Message[],
   mode: AgentMode = "build",
   skills: Skill[] = [],
+  repoMap?: string,
 ): Message[] {
   return [
-    { role: "user", content: workingMemory(messages, mode, skills) },
+    { role: "user", content: workingMemory(messages, mode, skills, repoMap) },
     ...messages.map((m) =>
       m.role === "tool" ? { ...m, result: { ...m.result, output: truncate(m.result.output) } } : m,
     ),

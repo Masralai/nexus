@@ -18,11 +18,24 @@ export function modePolicy(mode: AgentMode = "build"): ModePolicy {
   if (mode === "plan") {
     return {
       mode,
-      rules: { denyTools: [...PLAN_DENY] },
+      rules: {
+        denyTools: [...PLAN_DENY],
+        edit: "deny",
+        bash: "deny",
+        external_directory: "ask",
+        doom_loop: "ask",
+      } as PermissionRules,
       guidance: "\nMode: plan — explore and propose a plan; do not implement or mutate files.",
     }
   }
-  return { mode: "build", rules: {}, guidance: "" }
+  return {
+    mode: "build",
+    rules: {
+      external_directory: "ask",
+      doom_loop: "ask",
+    } as PermissionRules,
+    guidance: "",
+  }
 }
 
 export function isReadonlyTool(tool: Pick<Tool, "readonly" | "name">): boolean {

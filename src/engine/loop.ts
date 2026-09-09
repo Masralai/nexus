@@ -3,6 +3,7 @@ import type { Provider } from "../providers/types"
 import { assemblePrompt, budgetPct, budgetUsed, maybeCompact } from "./context"
 import { advertiseTools, modePolicy, isReadonlyTool, type AgentMode } from "./mode"
 import { gateToolCall, reasonForCall, type PermissionRules } from "./permission"
+import { buildRepoMap } from "./repo-map"
 import type { JSONLStore } from "./state"
 import type { EngineEvent, Message, Tool, ToolCall, ToolContext, ToolResult } from "./types"
 import type { Skill } from "../skills"
@@ -31,12 +32,22 @@ export interface RunConfig {
 
 function mergeRules(base: PermissionRules, extra?: PermissionRules): PermissionRules {
   if (!extra) return base
-  return {
+  const merged: PermissionRules = {
     allowTools: [...(base.allowTools ?? []), ...(extra.allowTools ?? [])],
     denyTools: [...(base.denyTools ?? []), ...(extra.denyTools ?? [])],
     askTools: [...(base.askTools ?? []), ...(extra.askTools ?? [])],
     denyPatterns: [...(base.denyPatterns ?? []), ...(extra.denyPatterns ?? [])],
   }
+  // granular opencode fields: extra overwrites base if defined
+  for (const [k, v] of Object.entries(extra)) {
+    if (["allowTools", "denyTools", "askTools", "denyPatterns"].includes(k)) continue
+    if (v !== undefined) (merged as Record<string, unknown>)[k] = v
+  }
+  for (const [k, v] of Object.entries(base)) {
+    if (["allowTools", "denyTools", "askTools", "denyPatterns"].includes(k)) continue
+    if ((merged as Record<string, unknown>)[k] === undefined && v !== undefined) (merged as Record<string, unknown>)[k] = v
+  }
+  return merged
 }
 
 function sameMessage(a: Message, b: Message): boolean {
@@ -81,6 +92,13 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
 
   let steps = 0
   let result = ""
+  const doomCounts = new Map<string, number>()
+  let repoMap: string | undefined
+  try {
+    repoMap = await buildRepoMap(cwd)
+  } catch {
+    repoMap = undefined
+  }
 
   try {
     while (true) {
@@ -101,6 +119,10 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
           })
           if (compacted) {
             working = compacted
+            // Persist hidden-agent compaction summary so resume retains continuity (opencode parity)
+            try {
+              store?.append(sessionId, compacted[0])
+            } catch { /* ignore persistence errors */ }
             yield { type: "contextUpdate", used: budgetUsed(working), limit, pct: budgetPct(working, limit) }
           }
         } catch {
@@ -109,7 +131,7 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
       }
 
       const toolDefs = advertiseTools(registry, mode)
-      const prompt = assemblePrompt(working, mode, cfg.skills ?? [])
+      const prompt = assemblePrompt(working, mode, cfg.skills ?? [], repoMap)
       const stream = provider.stream(prompt, toolDefs, { signal: cfg.signal })
 
       let content: string | null = null
@@ -138,6 +160,27 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
         if (!tool) {
           grants.set(call.id, true)
           continue
+        }
+        // doom_loop detection: 3+ identical tool calls
+        const doomKey = `${call.name}:${JSON.stringify(call.input)}`
+        const prev = doomCounts.get(doomKey) ?? 0
+        doomCounts.set(doomKey, prev + 1)
+        if (prev + 1 >= 3 && rules.doom_loop !== "allow") {
+          const doomDecision = rules.doom_loop ?? "ask"
+          if (doomDecision === "deny") {
+            grants.set(call.id, false)
+            yield { type: "permissionRequest", id: call.id, name: call.name, input: call.input, reason: `doom_loop: repeated ${call.name} 3x` }
+            continue
+          }
+          if (doomDecision === "ask") {
+            const req = { id: call.id, name: call.name, input: call.input, reason: `doom_loop: repeated ${call.name} 3x` }
+            yield { type: "permissionRequest", ...req }
+            let granted = false
+            if (cfg.askPermission) granted = await cfg.askPermission(req)
+            else granted = cfg.autoApprove ?? false
+            grants.set(call.id, granted)
+            continue
+          }
         }
         const askEvents: { id: string; name: string; input: unknown; reason: string }[] = []
         const granted = await gateToolCall({

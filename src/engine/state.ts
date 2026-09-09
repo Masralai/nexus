@@ -30,7 +30,8 @@ export function sessionTitle(messages: Message[]): string {
   if (typeof rawCandidate !== "string") return ""
   const firstLine = rawCandidate.split("\n")[0]?.trim() ?? ""
   if (!firstLine) return ""
-  return firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine
+  const max = 200
+  return firstLine.length > max ? `${firstLine.slice(0, max)}…` : firstLine
 }
 
 export function sessionDisplayTitle(meta: SessionMeta, messages: Message[]): string {
