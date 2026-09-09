@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Box, useApp, useInput, useStdout } from "ink"
+import { Box, Text, useApp, useInput, useStdout } from "ink"
 import { randomUUID } from "node:crypto"
 import {
   applyPresetToConfig,
@@ -50,6 +50,8 @@ export function Shell() {
   const [created, setCreated] = useState(false)
   const [chrome, setChrome] = useState(initialChrome)
   const [busy, setBusy] = useState(false)
+  const [busySince, setBusySince] = useState<number | undefined>(undefined)
+  const [tick, setTick] = useState(0)
   const [live, setLive] = useState<TUIState>(() => initialTUIState(loadConfig().model || "?"))
   const [overlay, setOverlay] = useState<Overlay>(null)
   const [log, setLog] = useState<string[]>([])
@@ -89,6 +91,12 @@ export function Shell() {
     if (needKey) startKeyFlow()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    if (busySince === undefined) return
+    const id = setInterval(() => setTick((n) => n + 1), 80)
+    return () => clearInterval(id)
+  }, [busySince])
 
   useEffect(() => {
     if (!stdout) return
@@ -299,6 +307,7 @@ export function Shell() {
     const nextMsgs = [...messages, { role: "user" as const, content: userText }]
     setMessages(nextMsgs)
     setBusy(true)
+    setBusySince(Date.now())
     setLive(initialTUIState(loadConfig().model || "?"))
     const ac = new AbortController()
     acRef.current = ac
@@ -342,6 +351,7 @@ export function Shell() {
       }
     } finally {
       setBusy(false)
+      setBusySince(undefined)
       acRef.current = null
       try {
         setMessages(store.load(sessionId).messages)
@@ -585,6 +595,16 @@ export function Shell() {
           />
         )}
       </Box>
+      {busy ? (
+        <Box>
+          <Text color={t.boneDim}>
+            {(() => {
+              const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+              return frames[tick % frames.length]
+            })()}
+          </Text>
+        </Box>
+      ) : null}
     </Box>
   )
 }
