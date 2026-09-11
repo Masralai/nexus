@@ -16,12 +16,25 @@ import { PRESETS, getPreset, otherPreset } from "../providers/presets"
 import { discoverSkills, findSkill, type Skill } from "../skills"
 import { copyToClipboard } from "./clipboard"
 import { Composer } from "./composer"
-import { Header } from "./header"
+import { Footer } from "./footer"
 import { LineInput } from "./line-input"
 import { disableMouse, enableMouse, parseMouseEvent } from "./mouse"
 import { PermissionGate } from "./permission-gate"
 import { Picker } from "./picker"
-import { extractSelection, initialChrome, present, reduceChrome, screenRows, streamRows, windowStream } from "./present"
+import { appendHistory, loadHistory } from "./history"
+import {
+  clampOffset,
+  extractSelection,
+  initialChrome,
+  interpolatedOffset,
+  maxStart,
+  present,
+  reduceChrome,
+  screenRows,
+  scrollStep,
+  streamRows,
+  windowStream,
+} from "./present"
 import type { SelectionAnchor } from "./present"
 import { HELP, filterSlashCommands, parseSlash, parseSlashArgs } from "./slash"
 import { Stream } from "./stream"
@@ -48,7 +61,7 @@ export function Shell() {
   const [sessionId, setSessionId] = useState(String(randomUUID()))
   const [messages, setMessages] = useState<Message[]>([])
   const [created, setCreated] = useState(false)
-  const [chrome, setChrome] = useState(initialChrome)
+  const [chrome, setChrome] = useState(() => ({ ...initialChrome(), history: loadHistory() }))
   const [busy, setBusy] = useState(false)
   const [busySince, setBusySince] = useState<number | undefined>(undefined)
   const [tick, setTick] = useState(0)
@@ -69,9 +82,9 @@ export function Shell() {
   const slashOpen = !overlay && !busy && chrome.input.startsWith("/")
   const cols = stdout?.columns ?? 80
   const rows = stdout?.rows ?? 24
-  const HEADER_ROWS = 3
+  const FOOTER_ROWS = 3
   const COMPOSER_ROWS = 3
-  const streamH = Math.max(4, rows - HEADER_ROWS - COMPOSER_ROWS)
+  const streamH = Math.max(4, rows - FOOTER_ROWS - COMPOSER_ROWS)
   const t = theme()
 
   const shown = present({
@@ -104,17 +117,74 @@ export function Shell() {
     return () => disableMouse(stdout)
   }, [stdout])
 
-  function pageScroll(dir: "up" | "down") {
-    const page = Math.max(1, Math.floor(streamH / 2))
+  const smoothRef = useRef<{
+    timer: ReturnType<typeof setInterval> | null
+    start: number
+    target: number
+    startTime: number
+    duration: number
+    current: number
+    contentLength: number
+    viewHeight: number
+  } | null>(null)
+
+  const cancelSmooth = () => {
+    if (smoothRef.current?.timer) clearInterval(smoothRef.current.timer)
+    smoothRef.current = null
+  }
+
+  useEffect(() => cancelSmooth, [])
+
+  useEffect(() => {
+    if (overlay) cancelSmooth()
+  }, [overlay])
+
+  useEffect(() => {
+    cancelSmooth()
+  }, [streamH, cols])
+
+  function smoothScroll(dir: "up" | "down", kind: "wheel" | "ctrl" | "page") {
     const contentLength = streamRows(shown.stream, cols)
-    setChrome((c) =>
-      reduceChrome(c, {
-        type: dir === "up" ? "pageUp" : "pageDown",
-        page,
-        contentLength,
-        viewHeight: streamH,
-      }),
-    )
+    const viewHeight = streamH
+    if (contentLength <= viewHeight) return
+    const max = maxStart(contentLength, viewHeight)
+    const step = scrollStep(kind, viewHeight)
+    const delta = dir === "up" ? -step : step
+    const currentRendered = smoothRef.current?.current ?? (chrome.followTail ? max : chrome.viewportOffset)
+    const baseTarget = smoothRef.current?.target ?? currentRendered
+    const target = clampOffset(baseTarget + delta, contentLength, viewHeight)
+    const start = currentRendered
+    if (target === baseTarget && target === currentRendered) {
+      // already at edge - ensure followTail correctly set if at tail
+      if (target >= max && !chrome.followTail) {
+        setChrome((c) => ({ ...c, viewportOffset: target, followTail: true }))
+      }
+      return
+    }
+    // if target didn't move but we are animating, still need to handle followTail edge
+    if (target === baseTarget) return
+    const duration = kind === "wheel" ? 120 : kind === "ctrl" ? 150 : 180
+    const startTime = Date.now()
+    if (smoothRef.current?.timer) clearInterval(smoothRef.current.timer)
+    smoothRef.current = { timer: null, start, target, startTime, duration, current: start, contentLength, viewHeight }
+    const timer = setInterval(() => {
+      const elapsed = Date.now() - startTime
+      const progress = Math.min(1, elapsed / duration)
+      const next = interpolatedOffset(start, target, progress)
+      if (smoothRef.current) smoothRef.current.current = next
+      const atTail = next >= max
+      setChrome((c) => ({ ...c, viewportOffset: next, followTail: atTail }))
+      if (progress >= 1) {
+        clearInterval(timer)
+        smoothRef.current = null
+      }
+    }, 16)
+    if (smoothRef.current) smoothRef.current.timer = timer
+  }
+
+  // keep legacy name for any external refs (now delegates to smooth with ctrl-sized step)
+  function pageScroll(dir: "up" | "down") {
+    smoothScroll(dir, "ctrl")
   }
 
   function startKeyFlow() {
@@ -292,7 +362,7 @@ export function Shell() {
         setCreated(true)
         setOverlay(null)
         setLog([])
-        setChrome(initialChrome())
+        setChrome((c) => ({ ...initialChrome(), history: c.history.length ? c.history : loadHistory() }))
         setLive(initialTUIState(loaded.meta.model))
       },
     })
@@ -381,7 +451,7 @@ export function Shell() {
       setCreated(false)
       setActiveSkills([])
       setLog([])
-      setChrome(initialChrome())
+      setChrome((c) => ({ ...initialChrome(), history: c.history }))
       setLive(initialTUIState(loadConfig().model || "?"))
     } else {
       const skill = findSkill(discoverSkills(), cmd)
@@ -393,10 +463,10 @@ export function Shell() {
   useInput((ch, key) => {
     const mouse = parseMouseEvent(ch)
 
-    // Wheel scroll
+    // Wheel scroll - line-by-line smooth (opencode parity: 3 rows per notch)
     if (mouse?.type === "wheel") {
-      if (mouse.button === 4) pageScroll("up")
-      else pageScroll("down")
+      if (mouse.button === 4) smoothScroll("up", "wheel")
+      else smoothScroll("down", "wheel")
       return
     }
 
@@ -464,12 +534,20 @@ export function Shell() {
       return
     }
 
-    if (key.pageUp || (key.ctrl && (ch === "u" || ch === "\x15"))) {
-      pageScroll("up")
+    if (key.pageUp) {
+      smoothScroll("up", "page")
       return
     }
-    if (key.pageDown || (key.ctrl && (ch === "d" || ch === "\x04"))) {
-      pageScroll("down")
+    if (key.pageDown) {
+      smoothScroll("down", "page")
+      return
+    }
+    if (key.ctrl && (ch === "u" || ch === "\x15")) {
+      smoothScroll("up", "ctrl")
+      return
+    }
+    if (key.ctrl && (ch === "d" || ch === "\x04")) {
+      smoothScroll("down", "ctrl")
       return
     }
 
@@ -510,7 +588,14 @@ export function Shell() {
         return
       }
       setChrome((c) => reduceChrome(c, { type: "commitUser" }))
-      if (line) void runTurnUi(line)
+      if (line) {
+        try {
+          appendHistory(line)
+        } catch {
+          /* history persist is best-effort */
+        }
+        void runTurnUi(line)
+      }
       return
     }
     if (key.escape) {
@@ -557,7 +642,6 @@ export function Shell() {
 
   return (
     <Box flexDirection="column" width={cols}>
-      <Header header={shown.header} cols={cols} t={t} />
       <Stream blocks={windowed} height={streamH} busy={busy} t={t} cols={cols} anchor={selAnchor} active={selActive} />
       <Box marginTop={1}>
         {overlay?.kind === "picker" ? (
@@ -591,9 +675,13 @@ export function Shell() {
             busy={shown.composer.busy}
             slashIdx={shown.composer.slashIdx}
             scrollable={scrollable}
+            historyLen={shown.composer.historyLen}
             t={t}
           />
         )}
+      </Box>
+      <Box marginTop={1}>
+        <Footer footer={shown.footer} cols={cols} t={t} />
       </Box>
       {busy ? (
         <Box>

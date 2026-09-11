@@ -10,6 +10,7 @@ export function Composer({
   busy,
   slashIdx,
   scrollable,
+  historyLen,
   t,
 }: {
   mode: AgentMode
@@ -18,6 +19,7 @@ export function Composer({
   busy: boolean
   slashIdx: number
   scrollable?: boolean
+  historyLen?: number
   t: Theme
 }) {
   if (busy) {
@@ -58,6 +60,9 @@ export function Composer({
       ) : null}
       {scrollable ? (
         <Text color={t.boneDim}>scroll: wheel · Ctrl+U/D</Text>
+      ) : null}
+      {!slashOpen && !busy && (historyLen ?? 0) > 0 ? (
+        <Text color={t.boneDim}>↑↓ history</Text>
       ) : null}
     </Box>
   )

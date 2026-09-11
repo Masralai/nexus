@@ -8,9 +8,7 @@ export function Header({ header: h, cols, t }: { header: HeaderView; cols: numbe
   return (
     <Box flexDirection="column">
       <Text>
-        <Text color={t.boneDim}>SESSION </Text>
-        <Text color={t.bone}>{h.session}</Text>
-        <Text color={t.boneDim}>  ·  MODE </Text>
+        <Text color={t.boneDim}>MODE </Text>
         <Text color={h.mode === "plan" ? t.steel : t.bone}>{h.mode}</Text>
         <Text color={t.boneDim}>  ·  MODEL </Text>
         <Text color={t.bone}>{h.model}</Text>

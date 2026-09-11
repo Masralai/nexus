@@ -1,6 +1,7 @@
 import type { AgentMode } from "../engine/mode"
 import type { Message } from "../engine/types"
 import { assistantPlainLines } from "./markdown"
+import { HISTORY_LIMIT } from "./history"
 
 export type StreamBlock =
   | { kind: "splash" }
@@ -49,8 +50,7 @@ export interface PresentInput {
   log: string[]
 }
 
-export interface HeaderView {
-  session: string
+export interface FooterView {
   mode: AgentMode
   model: string
   skills: string[]
@@ -61,15 +61,23 @@ export interface HeaderView {
   connected: boolean
 }
 
+/** @deprecated - footer is rendered below composer, session not shown. Use FooterView */
+export interface HeaderView extends FooterView {
+  session: string
+}
+
 export interface ComposerView {
   mode: AgentMode
   value: string
   cursor: number
   busy: boolean
   slashIdx: number
+  historyLen: number
 }
 
 export interface ShellView {
+  footer: FooterView
+  /** @deprecated use footer */
   header: HeaderView
   stream: StreamBlock[]
   composer: ComposerView
@@ -197,9 +205,14 @@ export function reduceChrome(state: ChromeState, ev: ChromeEvent): ChromeState {
       if (!line) {
         return { ...state, input: "", cursor: 0, historyIdx: null, draft: "", slashIdx: 0 }
       }
+      if (state.history[state.history.length - 1] === line) {
+        return { ...state, input: "", cursor: 0, historyIdx: null, draft: "", slashIdx: 0 }
+      }
+      const next = [...state.history, line]
+      const history = next.length > HISTORY_LIMIT ? next.slice(next.length - HISTORY_LIMIT) : next
       return {
         ...state,
-        history: [...state.history, line],
+        history,
         input: "",
         cursor: 0,
         historyIdx: null,
@@ -266,18 +279,19 @@ export function present(input: PresentInput): ShellView {
   for (const line of input.log) stream.push({ kind: "log", text: line })
   if (live.error) stream.push({ kind: "error", text: live.error })
   if (live.aborted) stream.push({ kind: "aborted" })
+  const footer: FooterView = {
+    mode: input.mode,
+    model: live.status.model,
+    skills: input.skillNames,
+    ctxUsed: live.status.used,
+    ctxLimit: live.status.limit,
+    ctxPct: live.status.pct,
+    steps: live.status.steps,
+    connected: input.connected,
+  }
   return {
-    header: {
-      session: input.sessionId.slice(0, 8),
-      mode: input.mode,
-      model: live.status.model,
-      skills: input.skillNames,
-      ctxUsed: live.status.used,
-      ctxLimit: live.status.limit,
-      ctxPct: live.status.pct,
-      steps: live.status.steps,
-      connected: input.connected,
-    },
+    footer,
+    header: { ...footer, session: input.sessionId.slice(0, 8) },
     stream,
     composer: {
       mode: input.mode,
@@ -285,6 +299,7 @@ export function present(input: PresentInput): ShellView {
       cursor: chrome.cursor,
       busy: input.busy,
       slashIdx: chrome.slashIdx,
+      historyLen: chrome.history.length,
     },
     overlay: input.overlay,
     viewportOffset: chrome.viewportOffset,
@@ -312,7 +327,7 @@ export function linesOf(block: StreamBlock, cols: number): string[] {
   const inner = Math.max(1, cols - USER_GUTTER)
   switch (block.kind) {
     case "splash":
-      return ["Nexus", "BYOK coding agent"]
+      return ["Nexus"]
     case "user":
       return wrapLines(block.text, inner)
     case "assistant":
@@ -422,6 +437,35 @@ export function clampRow(row: number, maxRow: number): number {
 /** Clamp a column index to valid range for a line. */
 export function clampCol(col: number, line: string): number {
   return Math.max(0, Math.min(line.length, col))
+}
+
+export function maxStart(contentLength: number, viewHeight: number): number {
+  return Math.max(0, contentLength - viewHeight)
+}
+
+export function clampOffset(offset: number, contentLength: number, viewHeight: number): number {
+  return Math.max(0, Math.min(maxStart(contentLength, viewHeight), offset))
+}
+
+export function scrollStep(kind: "wheel" | "ctrl" | "page", viewHeight: number): number {
+  switch (kind) {
+    case "wheel":
+      return 3
+    case "ctrl":
+      return Math.max(5, Math.ceil(Math.max(1, viewHeight) / 4))
+    case "page":
+      return Math.max(1, viewHeight - 2)
+  }
+}
+
+export function easeOutCubic(t: number): number {
+  const p = Math.max(0, Math.min(1, t))
+  return 1 - Math.pow(1 - p, 3)
+}
+
+export function interpolatedOffset(start: number, target: number, progress: number): number {
+  const eased = easeOutCubic(progress)
+  return Math.round(start + (target - start) * eased)
 }
 
 /** Extract selected text from screen rows between two anchor points. */

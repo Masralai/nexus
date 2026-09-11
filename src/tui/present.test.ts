@@ -1,7 +1,20 @@
 import { expect, test } from "bun:test"
 import type { Message } from "../engine/types"
 import { initialTUIState } from "./state"
-import { initialChrome, present, reduceChrome, streamRows, windowStream, linesOf, type PresentInput } from "./present"
+import {
+  clampOffset,
+  easeOutCubic,
+  initialChrome,
+  interpolatedOffset,
+  linesOf,
+  maxStart,
+  present,
+  reduceChrome,
+  scrollStep,
+  streamRows,
+  windowStream,
+  type PresentInput,
+} from "./present"
 
 function input(partial: Partial<PresentInput> = {}): PresentInput {
   return {
@@ -22,6 +35,17 @@ function input(partial: Partial<PresentInput> = {}): PresentInput {
 test("empty session presents splash and header chrome", () => {
   const v = present(input())
   expect(v.stream).toEqual([{ kind: "splash" }])
+  expect(v.footer).toEqual({
+    mode: "build",
+    model: "claude-opus",
+    skills: [],
+    ctxUsed: 0,
+    ctxLimit: 0,
+    ctxPct: 0,
+    steps: 0,
+    connected: true,
+  })
+  // header deprecated alias still carries session for compat
   expect(v.header).toEqual({
     session: "abcdef12",
     mode: "build",
@@ -33,6 +57,8 @@ test("empty session presents splash and header chrome", () => {
     steps: 0,
     connected: true,
   })
+  // footer must not expose session
+  expect((v.footer as unknown as { session?: string }).session).toBeUndefined()
   expect(v.composer.mode).toBe("build")
   expect(v.overlay).toBeNull()
 })
@@ -139,14 +165,22 @@ test("header reflects plan mode, skills, ctx, and disconnected", () => {
       overlay: "permission",
     }),
   )
+  expect(v.footer.mode).toBe("plan")
+  expect(v.footer.skills).toEqual(["grill"])
+  expect(v.footer.connected).toBe(false)
+  expect(v.footer.ctxUsed).toBe(100)
+  expect(v.footer.ctxLimit).toBe(8000)
+  expect(v.footer.steps).toBe(3)
+  // deprecated header mirrors footer + session
   expect(v.header.mode).toBe("plan")
-  expect(v.header.skills).toEqual(["grill"])
-  expect(v.header.connected).toBe(false)
-  expect(v.header.ctxUsed).toBe(100)
-  expect(v.header.ctxLimit).toBe(8000)
-  expect(v.header.steps).toBe(3)
   expect(v.composer.mode).toBe("plan")
   expect(v.overlay).toBe("permission")
+})
+
+test("footer does not expose session id", () => {
+  const v = present(input())
+  expect((v.footer as unknown as { session?: string }).session).toBeUndefined()
+  expect(v.footer.mode).toBe("build")
 })
 
 test("insert and arrow keys move the composer cursor", () => {
@@ -186,6 +220,32 @@ test("slash commands are not stored as user history", () => {
   let c = reduceChrome(initialChrome(), { type: "insert", ch: "/help" })
   c = reduceChrome(c, { type: "clear" })
   expect(c.input).toBe("")
+  expect(c.history).toEqual([])
+})
+
+test("commitUser dedups consecutive duplicate", () => {
+  let c = initialChrome()
+  c = reduceChrome(c, { type: "insert", ch: "dup" })
+  c = reduceChrome(c, { type: "commitUser" })
+  c = reduceChrome(c, { type: "insert", ch: "dup" })
+  c = reduceChrome(c, { type: "commitUser" })
+  expect(c.history).toEqual(["dup"])
+})
+
+test("commitUser caps history at 100", () => {
+  let c = initialChrome()
+  for (let i = 0; i < 105; i++) {
+    c = reduceChrome(c, { type: "insert", ch: `p${i}` })
+    c = reduceChrome(c, { type: "commitUser" })
+  }
+  expect(c.history.length).toBe(100)
+  expect(c.history[0]).toBe("p5")
+  expect(c.history[99]).toBe("p104")
+})
+
+test("commitUser ignores empty trim", () => {
+  let c = reduceChrome(initialChrome(), { type: "insert", ch: "   " })
+  c = reduceChrome(c, { type: "commitUser" })
   expect(c.history).toEqual([])
 })
 
@@ -282,4 +342,94 @@ test("slash highlight wraps", () => {
   expect(c.slashIdx).toBe(0)
   c = reduceChrome(c, { type: "slashPrev", count: 3 })
   expect(c.slashIdx).toBe(2)
+})
+
+test("scrollStep returns opencode-parity sizes", () => {
+  expect(scrollStep("wheel", 10)).toBe(3)
+  expect(scrollStep("wheel", 30)).toBe(3)
+  expect(scrollStep("ctrl", 10)).toBe(5)
+  expect(scrollStep("ctrl", 20)).toBe(5)
+  expect(scrollStep("ctrl", 40)).toBe(10)
+  expect(scrollStep("ctrl", 24)).toBe(6)
+  expect(scrollStep("page", 10)).toBe(8)
+  expect(scrollStep("page", 4)).toBe(2)
+  expect(scrollStep("page", 1)).toBe(1)
+})
+
+test("maxStart and clampOffset handle boundaries", () => {
+  expect(maxStart(20, 8)).toBe(12)
+  expect(maxStart(5, 10)).toBe(0)
+  expect(clampOffset(-5, 20, 8)).toBe(0)
+  expect(clampOffset(100, 20, 8)).toBe(12)
+  expect(clampOffset(5, 20, 8)).toBe(5)
+})
+
+test("easeOutCubic endpoints and monotonic", () => {
+  expect(easeOutCubic(0)).toBe(0)
+  expect(easeOutCubic(1)).toBe(1)
+  expect(easeOutCubic(0.5)).toBeCloseTo(0.875, 5)
+  expect(easeOutCubic(0.25) < easeOutCubic(0.5)).toBe(true)
+  expect(easeOutCubic(-1)).toBe(0)
+  expect(easeOutCubic(2)).toBe(1)
+})
+
+test("interpolatedOffset eases toward target", () => {
+  expect(interpolatedOffset(0, 10, 0)).toBe(0)
+  expect(interpolatedOffset(0, 10, 1)).toBe(10)
+  // 0.5 progress with ease 0.875 => 8.75 rounded 9
+  expect(interpolatedOffset(0, 10, 0.5)).toBe(9)
+  expect(interpolatedOffset(10, 0, 0.5)).toBe(1)
+})
+
+test("wheel-sized 3-row steps scroll line-by-line from tail", () => {
+  let c = initialChrome()
+  // content 20 rows, viewport 8, maxStart 12, tail at 12
+  const total = 20
+  const h = 8
+  const wheel = scrollStep("wheel", h)
+  expect(wheel).toBe(3)
+  c = reduceChrome(c, { type: "pageUp", page: wheel, contentLength: total, viewHeight: h })
+  expect(c.viewportOffset).toBe(9)
+  expect(c.followTail).toBe(false)
+  c = reduceChrome(c, { type: "pageUp", page: wheel, contentLength: total, viewHeight: h })
+  expect(c.viewportOffset).toBe(6)
+  c = reduceChrome(c, { type: "pageDown", page: wheel, contentLength: total, viewHeight: h })
+  expect(c.viewportOffset).toBe(9)
+})
+
+test("ctrl and page steps computed from view height", () => {
+  const h = 10
+  const ctrl = scrollStep("ctrl", h)
+  const page = scrollStep("page", h)
+  let c = initialChrome()
+  c = reduceChrome(c, { type: "pageUp", page: ctrl, contentLength: 30, viewHeight: h })
+  expect(c.viewportOffset).toBe(20 - ctrl) // 20 = 30-10 maxStart
+  c = reduceChrome(c, { type: "pageDown", page: page, contentLength: 30, viewHeight: h })
+  // 15 + 8 = 23 clamped to 20 => re-pins to tail
+  expect(c.followTail).toBe(true)
+  // page from 15 -> 23 but clamped to max 20
+  const c2 = reduceChrome(initialChrome(), { type: "pageUp", page: page, contentLength: 30, viewHeight: h })
+  expect(c2.viewportOffset).toBe(12)
+})
+
+test("windowStream clips at 1-row granularity for wheel steps", () => {
+  const blocks = [
+    { kind: "user" as const, text: "q0" },
+    { kind: "assistant" as const, text: Array.from({ length: 20 }, (_, i) => `L${i}`).join("\n") },
+  ]
+  const cols = 80
+  const h = 6
+  const total = streamRows(blocks, cols)
+  let offset = maxStart(total, h)
+  // move up by 1 row and ensure window shows one extra earlier line
+  const winTail = windowStream(blocks, { cols, height: h, offset, followTail: false })
+  const winUp1 = windowStream(blocks, { cols, height: h, offset: offset - 1, followTail: false })
+  expect(winTail.length).toBeGreaterThan(0)
+  expect(winUp1.length).toBeGreaterThan(0)
+  // the first line of winUp1 should be one row earlier than tail
+  const allLines = blocks.flatMap((b) => linesOf(b, cols))
+  const tailLines = allLines.slice(offset, offset + h)
+  const up1Lines = allLines.slice(offset - 1, offset - 1 + h)
+  expect(up1Lines[0]).toBe(allLines[offset - 1])
+  expect(tailLines[0]).toBe(allLines[offset])
 })
