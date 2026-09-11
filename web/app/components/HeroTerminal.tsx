@@ -6,12 +6,12 @@ const lines = [
   { text: " Nexus", color: "text-[#58A6FF] font-bold" },
   { text: " you  look for vulnerabilities and provide a security report", color: "text-[#E6EDF3]", prefix: "you", prefixColor: "text-[#58A6FF]" },
   { text: "▶ read {\"path\":\"src/engine/permission.ts\"}", color: "text-[#A5D6FF]" },
-  { text: "  ok 42 lines — permission gate, decide() + gateToolCall()", color: "text-[#A5D6FF]" },
+  { text: "  ok 42 lines - permission gate, decide() + gateToolCall()", color: "text-[#A5D6FF]" },
   { text: "▶ grep {\"pattern\":\"eval.*\\(\"}", color: "text-[#A5D6FF]" },
-  { text: "  ok 2 matches — src/tools/index.ts:88, src/providers/sse.ts:42", color: "text-[#A5D6FF]" },
+  { text: "  ok 2 matches - src/tools/index.ts:88, src/providers/sse.ts:42", color: "text-[#A5D6FF]" },
   { text: "▶ glob {\"pattern\":\"src/**/*\"}", color: "text-[#A5D6FF]" },
-  { text: "  ok 18 files — no new surface", color: "text-[#A5D6FF]" },
-  { text: "No critical vulnerabilities. 2 low findings: `grep` avoids node_modules, `bash` is gated. Report written to ./security-report.md", color: "text-[#E6EDF3]" },
+  { text: "  ok 18 files - no new surface", color: "text-[#A5D6FF]" },
+  { text: "No critical vulnerabilities. 2 low findings: grep avoids node_modules, bash is gated. Report written to ./security-report.md", color: "text-[#E6EDF3]" },
 ];
 
 export function HeroTerminal() {
@@ -51,7 +51,7 @@ export function HeroTerminal() {
         })}
       </div>
 
-      {/* composer — matches image.png: build › look for vulnerabilities and provide a security report █ */}
+      {/* composer - matches image.png: build › look for vulnerabilities and provide a security report */}
       <div className="mt-4 pt-3 border-t border-zinc-800/60">
         <div className="flex items-baseline gap-1 text-[11px] sm:text-[12px]">
           <span className="text-[#58A6FF] shrink-0">build ›</span>

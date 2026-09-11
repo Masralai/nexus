@@ -4,8 +4,8 @@ import { motion, useReducedMotion } from "motion/react";
 
 const harnessLines = [
   { text: "▶ bash {\"command\":\"bun test\"} …", color: "text-[#A5D6FF]" },
-  { text: "  ok 42 tests passed — 1.2s", color: "text-[#A5D6FF]" },
-  { text: "fix: handle compact threshold at 0.8 — truncate only prompt, keep history", color: "text-[#E6EDF3]" },
+  { text: "  ok 42 tests passed - 1.2s", color: "text-[#A5D6FF]" },
+  { text: "fix: handle compact threshold at 0.8 - truncate only prompt, keep history", color: "text-[#E6EDF3]" },
   { text: "```ts // src/engine/context.ts", color: "text-[#A5D6FF] pl-4" },
   { text: "if (pct > threshold) await maybeCompact(messages)", color: "text-[#A5D6FF] pl-4" },
   { text: "```", color: "text-[#A5D6FF] pl-4" },
@@ -16,7 +16,7 @@ export function HarnessTerminal() {
   const reduce = useReducedMotion();
   return (
     <div className="bg-[#09090b] p-4 flex flex-col gap-1 font-mono text-[11px] leading-relaxed min-h-[240px]">
-      <div className="text-[10px] tracking-wide text-zinc-500 mb-1">Turn launcher — single seam</div>
+      <div className="text-[10px] tracking-wide text-zinc-500 mb-1">Turn launcher - single seam</div>
       <div className="flex flex-col gap-1">
         {harnessLines.map((l, i) => {
           if (reduce) {

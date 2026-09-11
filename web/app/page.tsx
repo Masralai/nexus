@@ -83,11 +83,7 @@ function Hero() {
               View docs
             </a>
           </div>
-          <div className="flex items-center gap-3 pt-2 font-mono text-[11px] text-zinc-500">
-            <span className="inline-flex items-center gap-2"><span className="size-1.5 rounded-full bg-cyan-400 animate-pulse" />All models in one binary</span>
-            <span className="text-zinc-700">/</span>
-            <span>No vendor lock</span>
-          </div>
+          
         </motion.div>
 
         <motion.div
