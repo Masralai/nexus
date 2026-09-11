@@ -10,7 +10,7 @@ const installTabs = [
   {
     id: "linux" as const,
     label: "LINUX / MACOS",
-    cmd: "curl -fsSL https://raw.githubusercontent.com/masralai/nexus/main/web/install.sh | sh",
+    cmd: "curl -fsSL https://raw.githubusercontent.com/masralai/nexus/main/scripts/install.sh | sh",
     installNote: "Installs to",
     path: "$HOME/.local/bin",
     suffix: "by default. Override with DIR=/usr/local/bin sh.",
@@ -18,7 +18,7 @@ const installTabs = [
   {
     id: "windows" as const,
     label: "WINDOWS",
-    cmd: "irm https://raw.githubusercontent.com/masralai/nexus/main/web/install.ps1 | iex",
+    cmd: "irm https://raw.githubusercontent.com/masralai/nexus/main/scripts/install.ps1 | iex",
     installNote: "Installs to",
     path: "%USERPROFILE%\\.local\\bin",
     suffix: "by default.",

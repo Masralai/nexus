@@ -56,7 +56,7 @@ Use it as an interactive shell for day-to-day coding or as a headless one-shot r
 ### Linux / macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/masralai/nexus/main/web/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/masralai/nexus/main/scripts/install.sh | sh
 # -> ~/.local/bin/nexus  (add to PATH if prompted)
 nexus --version
 ```
@@ -70,7 +70,7 @@ NEXUS_INSTALL_REPO=myorg/nexus sh web/install.sh
 ### Windows (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/masralai/nexus/main/web/install.ps1 | iex
+irm https://raw.githubusercontent.com/masralai/nexus/main/scripts/install.ps1 | iex
 # -> %USERPROFILE%\.local\bin\nexus.exe
 nexus --version
 ```

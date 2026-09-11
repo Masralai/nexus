@@ -23,7 +23,7 @@ try {
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
   Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
 } catch {
-  Write-Error "download failed: $_`nURL: $Url`nTip: no Release asset yet — use: bunx --package masralai/nexus nexus  or  irm https://raw.githubusercontent.com/masralai/nexus/main/web/install.ps1 | iex"
+  Write-Error "download failed: $_`nURL: $Url`nTip: no Release asset yet — use: bunx --package masralai/nexus nexus  or  irm https://raw.githubusercontent.com/masralai/nexus/main/scripts/install.ps1 | iex"
   exit 1
 }
 
