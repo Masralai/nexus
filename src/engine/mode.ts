@@ -25,7 +25,8 @@ export function modePolicy(mode: AgentMode = "build"): ModePolicy {
         external_directory: "ask",
         doom_loop: "ask",
       } as PermissionRules,
-      guidance: "\nMode: plan — explore and propose a plan; do not implement or mutate files.",
+      guidance:
+        "\nMode: plan — explore and propose a plan; do not implement or mutate files. You may still call multiple Readonly Tools (read/glob/grep/task) in parallel in one step for faster exploration.",
     }
   }
   return {

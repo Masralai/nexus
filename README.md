@@ -11,7 +11,7 @@
 
 # Nexus
 
-**Terminal-first, model-agnostic harness for software development. Bring your own key.**
+**Terminal-first, model-agnostic harness for software development.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/masralai/nexus/ci.yml?style=flat-square&label=CI)](https://github.com/masralai/nexus/actions)
 ![Bun](https://img.shields.io/badge/Bun-%3E%3D1.0-black?style=flat-square&logo=bun)
@@ -255,7 +255,7 @@ Session (JSONL) ──► Turn launcher (src/cli/launch.ts:27) ──► Turn (s
                                                           Context assembly + maybeCompact
 ```
 
-A **Session** holds many **Messages** and is advanced by **Turns**. Each Turn assembles a prompt from working memory (`src/engine/context.ts:17`), streams from the Provider, gates every tool call, executes readonly calls in parallel and mutators sequentially (`src/engine/loop.ts:168`), and appends results durably.
+A **Session** holds many **Messages** and is advanced by **Turns**. Each Turn assembles a prompt from working memory (`src/engine/context.ts:17`), streams from the Provider, gates every tool call, executes all Tool calls in parallel in one step (optimistic, provider-ordered) (`src/engine/loop.ts:168`), and appends results durably.
 
 Key seams:
 
@@ -270,13 +270,14 @@ Key seams:
 
 | Tool | Readonly | Input | Description |
 |------|----------|-------|-------------|
-| `read` | yes | `{ path, offset?, limit? }` | Read a file (line-windowed) |
+| `read` | yes | `{ path, offset?, limit? }` | Read a file (line-windowed) — emit N parallel `read` for N files |
 | `list` | yes | `{ path? }` | List a directory (prefer over `bash ls`) |
 | `glob` | yes | `{ pattern }` | Find files by glob |
 | `grep` | yes | `{ pattern, path? }` | Regex search (skips dotfiles/`node_modules`) |
 | `write` | no | `{ path, content }` | Create/overwrite a file |
 | `edit` | no | `{ path, oldString, newString }` | Exact-string replacement |
 | `bash` | no | `{ command }` | Run a shell command (30s timeout) |
+| `task` | yes | `{ prompt, subagent_type?: "explore"\|"plan" }` | Spawn parallel sub-agent(s) for research — emit N `task` in one step |
 
 > [!WARNING]
 > `bash` always asks for approval and should not be used for listing or reading files — use `list`/`glob`/`read`/`grep` instead.

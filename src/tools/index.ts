@@ -6,6 +6,7 @@ import { apply_patch, undoLast } from "./patch"
 import { todowrite, todoread } from "./todo"
 import { question } from "./question"
 import { lsp } from "./lsp"
+import { task } from "./task"
 
 const MAX_OUTPUT = 8000
 
@@ -15,7 +16,7 @@ function cap(text: string): string {
 
 export const read: Tool = {
   name: "read",
-  description: "Read a file. Input: { path, offset?, limit? } where offset/limit are 0-based line numbers.",
+  description: "Read a file. Input: { path, offset?, limit? } where offset/limit are 0-based line numbers. To read N files, emit N parallel read calls — one path per call, not paths[] or _raw.",
   schema: {
     type: "object",
     properties: { path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } },
@@ -23,7 +24,14 @@ export const read: Tool = {
   },
   readonly: true,
   async execute(input, ctx) {
+    const rawInput = input as Record<string, unknown>
+    if (rawInput && typeof rawInput === "object" && "_raw" in rawInput) {
+      return { ok: false, output: "", error: "Invalid read input: received _raw. Emit N separate read calls — one { path } per call — instead of batching." }
+    }
     const { path, offset, limit } = input as { path: string; offset?: number; limit?: number }
+    if (typeof path !== "string") {
+      return { ok: false, output: "", error: "Invalid read input: missing required string field 'path'. Emit one { path } per read call." }
+    }
     try {
       const raw = readFileSync(resolve(ctx.cwd, path), "utf8")
       const lines = raw.replace(/\n$/, "").split("\n")
@@ -103,7 +111,8 @@ export const bash: Tool = {
 
 export const list: Tool = {
   name: "list",
-  description: "List files and directories in a path. Prefer this over bash ls. Input: { path? }.",
+  description:
+    "List files and directories in a path. Prefer this over bash ls. Input: { path? }. For multiple directories, emit N parallel list calls.",
   schema: { type: "object", properties: { path: { type: "string" } } },
   readonly: true,
   async execute(input, ctx) {
@@ -122,7 +131,8 @@ export const list: Tool = {
 
 export const glob: Tool = {
   name: "glob",
-  description: "Find files matching a glob pattern. Input: { pattern }. Respects .gitignore; use ! in .ignore to un-ignore.",
+  description:
+    "Find files matching a glob pattern. Input: { pattern }. Respects .gitignore; use ! in .ignore to un-ignore. For multiple patterns, emit N parallel glob calls.",
   schema: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] },
   readonly: true,
   async execute(input, ctx) {
@@ -156,7 +166,8 @@ export const glob: Tool = {
 
 export const grep: Tool = {
   name: "grep",
-  description: "Search file contents with a regex. Input: { pattern, path? }. Respects .gitignore; skips node_modules/.git/.next/dist.",
+  description:
+    "Search file contents with a regex. Input: { pattern, path? }. Respects .gitignore; skips node_modules/.git/.next/dist. For multiple searches, emit N parallel grep calls.",
   schema: {
     type: "object",
     properties: { pattern: { type: "string" }, path: { type: "string" } },
@@ -249,7 +260,7 @@ export const undo: Tool = {
 }
 
 export function defaultTools(): Tool[] {
-  return [read, write, edit, bash, glob, grep, list, apply_patch, undo, todowrite, todoread, question, lsp]
+  return [read, write, edit, bash, glob, grep, list, apply_patch, undo, todowrite, todoread, question, lsp, task]
 }
 
 /** @deprecated Prefer tool.readonly / isReadonlyTool — kept for any external imports. */

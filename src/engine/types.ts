@@ -23,6 +23,23 @@ export interface ToolDefinition {
 
 export interface ToolContext {
   cwd: string
+  signal?: AbortSignal
+  depth?: number
+  maxDepth?: number
+  provider?: import("../providers/types").Provider
+  compactProvider?: import("../providers/types").Provider
+  registry?: Map<string, Tool>
+  model?: string
+  store?: import("./state").JSONLStore
+  sessionId?: string
+  maxSteps?: number
+  compactThreshold?: number
+  keepRecent?: number
+  mode?: import("./mode").AgentMode
+  skills?: import("../skills").Skill[]
+  askPermission?: (req: { id: string; name: string; input: unknown; reason: string }) => Promise<boolean>
+  autoApprove?: boolean
+  rules?: import("./permission").PermissionRules
 }
 
 export interface Tool {

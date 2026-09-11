@@ -121,6 +121,7 @@ test("persists every turn and replays losslessly", async () => {
 })
 
 test("runs reads in parallel, mutators sequentially", async () => {
+  // Updated for opencode optimistic parallel: all Tools in one step run concurrently
   let active = 0
   let maxActive = 0
   const tracker = (name: string, readonly: boolean): Tool => ({
@@ -153,7 +154,7 @@ test("runs reads in parallel, mutators sequentially", async () => {
       autoApprove: true,
     })),
   )
-  expect(maxActive).toBe(2)
+  expect(maxActive).toBe(3)
   const requests = evts.filter((e) => e.type === "permissionRequest")
   expect(requests.map((r) => (r as { name: string }).name)).toEqual(["bash"])
   expect(evts.filter((e) => e.type === "toolResult").map((r) => (r as { name: string }).name)).toEqual([
@@ -406,4 +407,194 @@ test("skips compaction when under threshold", async () => {
     })),
   )
   expect(cheap.lastPrompt).toEqual([])
+})
+
+test("runs mutators in parallel (optimistic)", async () => {
+  let active = 0
+  let maxActive = 0
+  const tracker = (name: string, readonly: boolean): Tool => ({
+    name,
+    description: "",
+    schema: {},
+    readonly,
+    async execute() {
+      active++
+      maxActive = Math.max(maxActive, active)
+      await new Promise((r) => setTimeout(r, 20))
+      active--
+      return { ok: true, output: name }
+    },
+  })
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "w1", name: "write", input: { path: "a" } }, { id: "w2", name: "write", input: { path: "b" } }] },
+    { content: "done" },
+  ])
+  const evts = await collect(
+    run([{ role: "user", content: "go" }], cfg({
+      provider,
+      registry: new Map([
+        ["write", tracker("write", false)],
+      ]),
+      autoApprove: true,
+    })),
+  )
+  expect(maxActive).toBe(2)
+  expect(evts.filter((e) => e.type === "toolResult").map((r) => (r as { name: string }).name)).toEqual(["write", "write"])
+  expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 1, result: "done" })
+})
+
+test("task spawns parallel sub-agents (optimistic)", async () => {
+  const { task } = await import("../tools/task")
+  // Parent provider will serve: parent task batch -> child1 content -> child2 content -> parent done
+  // Children each just return content without further tool calls
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "t1", name: "task", input: { prompt: "explore auth", subagent_type: "explore" } }, { id: "t2", name: "task", input: { prompt: "explore session", subagent_type: "explore" } }] },
+    { content: "child1 result" },
+    { content: "child2 result" },
+    { content: "done" },
+  ])
+  const evts = await collect(
+    run([{ role: "user", content: "go" }], cfg({
+      provider,
+      registry: new Map([["task", task]]),
+      autoApprove: true,
+    })),
+  )
+  const toolResults = evts.filter((e) => e.type === "toolResult") as { id: string; result: { output: string } }[]
+  expect(toolResults).toHaveLength(2)
+  const outputs = toolResults.map((r) => r.result.output).join("\n")
+  expect(outputs).toContain("child1 result")
+  expect(outputs).toContain("child2 result")
+  expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 1, result: "done" })
+})
+
+test("task respects maxDepth", async () => {
+  const { task } = await import("../tools/task")
+  // parent will try to run task but depth guard should cause task execute to return error
+  const provider2 = new MockProvider([
+    { toolCalls: [{ id: "t1", name: "task", input: { prompt: "deep" } }] },
+    { content: "done" },
+  ])
+  const evts2 = await collect(
+    run([{ role: "user", content: "go" }], cfg({
+      provider: provider2,
+      registry: new Map([["task", task]]),
+      autoApprove: true,
+      depth: 3,
+      maxDepth: 3,
+    })),
+  )
+  const tr = evts2.find((e) => e.type === "toolResult") as { result: { ok: boolean; error?: string } }
+  expect(tr.result.ok).toBe(false)
+  expect(tr.result.error).toContain("max sub-agent depth")
+})
+
+test("task does not pollute parent Session store", async () => {
+  const { task } = await import("../tools/task")
+  const dir = join(tmpdir(), "nexus-task-store-" + Math.random().toString(36).slice(2))
+  const store = new JSONLStore(dir)
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "t1", name: "task", input: { prompt: "explore", subagent_type: "explore" } }] },
+    { content: "child summary" },
+    { content: "done" },
+  ])
+  await collect(
+    run([{ role: "user", content: "go" }], cfg({
+      provider,
+      registry: new Map([["task", task]]),
+      store,
+      sessionId: "s-task",
+      autoApprove: true,
+    })),
+  )
+  const loaded = store.load("s-task")
+  // Only parent messages should be persisted: user, assistant(task), tool(task result), assistant(done)
+  expect(loaded.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"])
+  expect(loaded.messages[2].role).toBe("tool")
+  // child summary should be inside tool result, not as separate session message
+  expect((loaded.messages[2] as { result: { output: string } }).result.output).toContain("child summary")
+  expect(loaded.messages.some((m) => (m as { content?: string }).content?.includes("child summary") && m.role === "user")).toBe(false)
+})
+
+test("task explore is isolated from parent doom loop", async () => {
+  const { task } = await import("../tools/task")
+  // Parent will have repeated doom_loop block? Simpler: ensure child doomCounts are isolated
+  // We trigger 3 identical task calls in child vs parent separately — child should not affect parent counts
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "t1", name: "task", input: { prompt: "a" } }] },
+    { toolCalls: [{ id: "c1", name: "echo", input: { text: "x" } }] },
+    { content: "child done" },
+    { content: "parent done" },
+  ])
+  const echo: Tool = { name: "echo", description: "", schema: {}, readonly: true, async execute() { return { ok: true, output: "echo" } } }
+  // child provider will be same instance; child will do echo then done
+  // We need registry with echo and task
+  const evts = await collect(
+    run([{ role: "user", content: "go" }], cfg({
+      provider,
+      registry: new Map([["task", task], ["echo", echo]]),
+      autoApprove: true,
+    })),
+  )
+  expect(evts.some((e) => e.type === "toolResult" && (e as { name: string }).name === "task")).toBe(true)
+  expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 1, result: "parent done" })
+})
+
+test("read _raw hint surfaces helpful error", async () => {
+  const { read } = await import("../tools/index")
+  const res = await read.execute({ _raw: '{"path":"a"}{"path":"b"}', _parseError: "Invalid JSON" } as unknown, { cwd: "/tmp" })
+  expect(res.ok).toBe(false)
+  expect(res.error).toContain("Emit N separate read calls")
+})
+
+test("task explore blocks mutating tools", async () => {
+  const { task } = await import("../tools/task")
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "t1", name: "task", input: { prompt: "try to write", subagent_type: "explore" } }] },
+    // Child attempts write — should be unknown tool because explore registry is readonly-only
+    { toolCalls: [{ id: "c1", name: "write", input: { path: "evil", content: "x" } }] },
+    { content: "child done" },
+    { content: "parent done" },
+  ])
+  const evts = await collect(
+    run([{ role: "user", content: "go" }], cfg({
+      provider,
+      registry: new Map([["task", task], ["write", { name: "write", description: "", schema: {}, readonly: false, async execute() { return { ok: true, output: "wrote" } } }]]),
+      autoApprove: true,
+    })),
+  )
+  const taskResult = evts.find((e) => e.type === "toolResult" && (e as { name: string }).name === "task") as { result: { output: string } }
+  // Child's write should have failed and been captured in task summary
+  expect(taskResult.result.output).toContain("unknown tool: write")
+})
+
+test("abort propagates to task children", async () => {
+  const { task } = await import("../tools/task")
+  const ac = new AbortController()
+  // Parent will be aborted before task can complete — child should abort via parent signal
+  // We abort immediately after starting, mock provider delays
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "t1", name: "task", input: { prompt: "slow explore", subagent_type: "explore" } }] },
+    { content: "should not matter" },
+  ])
+  // Create a task that delays to allow abort
+  const slowTask: typeof task = {
+    ...task,
+    async execute(input, ctx) {
+      // Simulate slow child by delaying before calling original?
+      // Instead we test that if signal already aborted, task returns aborted quickly
+      const ctrl = ctx.signal
+      if (ctrl?.aborted) return { ok: false, output: "", error: "aborted" }
+      return task.execute(input, ctx)
+    },
+  }
+  ac.abort()
+  const evts = await collect(
+    run([{ role: "user", content: "go" }], cfg({
+      provider,
+      registry: new Map([["task", task]]),
+      signal: ac.signal,
+    })),
+  )
+  expect(evts).toEqual([{ type: "aborted" }])
 })

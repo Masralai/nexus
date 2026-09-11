@@ -128,7 +128,7 @@ export class Anthropic implements Provider {
         try {
           parsed = a.input ? JSON.parse(a.input) : {}
         } catch {
-          parsed = a.input ? { _raw: a.input } : {}
+          parsed = a.input ? { _raw: a.input, _parseError: "Invalid JSON for tool args — did you batch multiple calls? Emit N separate tool calls instead (one JSON object per call)." } : {}
         }
         return { id: a.id ?? "", name: a.name ?? "", input: parsed }
       })

@@ -28,6 +28,8 @@ export interface RunConfig {
   /** Active agent skills injected into working memory. */
   skills?: Skill[]
   askPermission?: (req: { id: string; name: string; input: unknown; reason: string }) => Promise<boolean>
+  depth?: number
+  maxDepth?: number
 }
 
 function mergeRules(base: PermissionRules, extra?: PermissionRules): PermissionRules {
@@ -76,6 +78,8 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
   const limit = provider.contextWindow
   const threshold = cfg.compactThreshold ?? 0.8
   const keepRecent = cfg.keepRecent ?? 6
+  const depth = cfg.depth ?? 0
+  const maxDepth = cfg.maxDepth ?? 3
   let working: Message[]
 
   if (store && !cfg.resume) {
@@ -203,18 +207,32 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
         const tool = registry.get(call.name)
         if (!tool) return { ok: false, output: "", error: `unknown tool: ${call.name}` }
         if (!grants.get(call.id)) return { ok: false, output: "", error: "permission denied" }
-        const ctx: ToolContext = { cwd }
+        const ctx: ToolContext = {
+          cwd,
+          signal: cfg.signal,
+          depth,
+          maxDepth,
+          provider,
+          compactProvider: cfg.compactProvider,
+          registry,
+          model,
+          store,
+          sessionId,
+          maxSteps,
+          compactThreshold: threshold,
+          keepRecent,
+          mode,
+          skills: cfg.skills,
+          askPermission: cfg.askPermission,
+          autoApprove: cfg.autoApprove,
+          rules,
+        }
         return tool.execute(call.input, ctx)
       }
 
       const results = new Map<string, ToolResult>()
-      const readonlyCalls = calls.filter((c) => {
-        const t = registry.get(c.name)
-        return t ? isReadonlyTool(t) : false
-      })
-      const mutatorCalls = calls.filter((c) => !readonlyCalls.includes(c))
-      await Promise.all(readonlyCalls.map(async (c) => results.set(c.id, await exec(c))))
-      for (const c of mutatorCalls) results.set(c.id, await exec(c))
+      // opencode optimistic parallel: all Tool calls in one step run concurrently
+      await Promise.all(calls.map(async (c) => results.set(c.id, await exec(c))))
 
       for (const call of calls) {
         const toolResult = results.get(call.id)!

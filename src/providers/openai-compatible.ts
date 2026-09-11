@@ -128,7 +128,8 @@ export class OpenAICompatible implements Provider {
         try {
           parsed = a.args ? JSON.parse(a.args) : {}
         } catch {
-          parsed = a.args ? { _raw: a.args } : {}
+          // Hint for batched JSON like {"path":"a"}{"path":"b"} — instruct model to use N separate calls
+          parsed = a.args ? { _raw: a.args, _parseError: "Invalid JSON for tool args — did you batch multiple calls? Emit N separate tool calls instead (one JSON object per call)." } : {}
         }
         // if parseArgs would have returned string, wrap; but we already handle
         return { id: a.id ?? `call_${a.name ?? "unknown"}`, name: a.name ?? "", input: parsed }

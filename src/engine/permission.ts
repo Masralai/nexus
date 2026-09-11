@@ -18,6 +18,7 @@ export interface PermissionRules {
   glob?: PermissionValue
   grep?: PermissionValue
   bash?: PermissionValue
+  task?: PermissionValue
   external_directory?: PermissionValue
   doom_loop?: PermissionAction
   // generic tool patterns (e.g. "mymcp_*": "ask")
