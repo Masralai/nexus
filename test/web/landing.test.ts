@@ -34,10 +34,7 @@ describe("terminal components exist and render expected content", () => {
     expect(src).toContain("nexus build mode");
   });
 
-  test("HeroTerminal renders gemini-2.5-flash and build prompt without steps", async () => {
-    const mod = await import("../../web/app/components/HeroTerminal");
-    expect(mod.HeroTerminal).toBeDefined();
-    // quick string check on source as independent truth
+  test("HeroTerminal renders gemini-2.5-flash and build prompt without steps", () => {
     const src = readFileSync(join(ROOT, "web/app/components/HeroTerminal.tsx"), "utf8");
     expect(src).toContain("gemini-2.5-flash");
     expect(src).toContain("look for vulnerabilities");
