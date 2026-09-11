@@ -20,6 +20,12 @@ import {
   CheckCircle,
 } from "@phosphor-icons/react";
 import { useState } from "react";
+import { TerminalChrome } from "./components/TerminalChrome";
+import { HeroTerminal } from "./components/HeroTerminal";
+import { ModelsTerminal } from "./components/ModelsTerminal";
+import { ToolsTerminal } from "./components/ToolsTerminal";
+import { HarnessTerminal } from "./components/HarnessTerminal";
+import { OpenSourceTerminal } from "./components/OpenSourceTerminal";
 
 function Nav() {
   return (
@@ -90,30 +96,13 @@ function Hero() {
           transition={{ duration: 0.7, delay: 0.12, ease: [0.16, 1, 0.3, 1] }}
           className="lg:col-span-6 lg:pl-6"
         >
-          <div className="relative rounded-2xl border border-zinc-800 bg-zinc-900 overflow-hidden shadow-[0_20px_60px_rgba(0,0,0,0.5)]">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800 bg-zinc-900">
-              <div className="flex items-center gap-1.5">
-                <span className="size-3 rounded-full bg-zinc-700" />
-                <span className="size-3 rounded-full bg-zinc-700" />
-                <span className="size-3 rounded-full bg-zinc-700" />
-              </div>
-              <span className="font-mono text-[11px] tracking-wide text-zinc-500">nexus build mode</span>
-              <span className="font-mono text-[11px] text-zinc-500 hidden sm:inline">~/projects/nexus</span>
-            </div>
-            <div className="p-0">
-              <img
-                src="https://picsum.photos/seed/nexus-terminal-hero/900/560"
-                alt="Terminal session showing code and tool calls"
-                width={900}
-                height={560}
-                className="w-full h-auto object-cover aspect-[1.6/1] opacity-90"
-              />
-            </div>
-            <div className="px-4 py-3 flex items-center justify-between bg-zinc-900 border-t border-zinc-800">
-              <span className="font-mono text-[11px] text-zinc-500">Session persisted to ~/.nexus/sessions/</span>
-              <span className="font-mono text-[11px] text-cyan-400">3 tools called</span>
-            </div>
-          </div>
+          <TerminalChrome
+            ariaLabel="Terminal session showing code and tool calls"
+            footerLeft="Session persisted to ~/.nexus/sessions/"
+            footerRight="3 tools called"
+          >
+            <HeroTerminal />
+          </TerminalChrome>
           <div className="mt-3 flex items-center gap-2 font-mono text-[11px] text-zinc-500">
             <Copy size={12} className="text-zinc-600" />
             <span>curl -fsSL get.nexus.run | sh</span>
@@ -217,7 +206,9 @@ function CapabilitiesBento() {
                 <span className="rounded-full border border-zinc-800 bg-zinc-950 px-3 py-1 text-zinc-300">Ollama</span>
               </div>
             </div>
-            <img src="https://picsum.photos/seed/nexus-models/600/400" alt="Abstract network representing multiple models" className="h-full w-full object-cover" />
+            <div className="h-full flex flex-col min-h-[280px]" role="img" aria-label="Model picker showing available models">
+              <ModelsTerminal />
+            </div>
           </div>
         </motion.div>
 
@@ -233,9 +224,11 @@ function CapabilitiesBento() {
           </div>
         </motion.div>
 
-        <motion.div initial={reduce ? false : { opacity: 0, y: 12 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.5, delay: 0.08 }} className="md:col-span-5 rounded-2xl border border-zinc-800 bg-zinc-900 overflow-hidden">
-          <img src="https://picsum.photos/seed/nexus-tools/600/360" alt="Close up of keyboard and terminal" className="h-[160px] w-full object-cover" />
-          <div className="p-6">
+        <motion.div initial={reduce ? false : { opacity: 0, y: 12 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.5, delay: 0.08 }} className="md:col-span-5 rounded-2xl border border-zinc-800 bg-zinc-900 overflow-hidden flex flex-col" role="img" aria-label="Close up of keyboard and terminal">
+          <div className="flex-1 min-h-[180px]">
+            <ToolsTerminal />
+          </div>
+          <div className="p-6 border-t border-zinc-800 bg-zinc-900">
             <h3 className="font-sans text-[16px] font-semibold text-zinc-100">Seven tools that cover the workspace</h3>
             <p className="mt-2 text-[13px] leading-relaxed text-zinc-400">read, list, glob, grep, write, edit, bash. Permission gate asks for mutators.</p>
           </div>
@@ -283,14 +276,9 @@ function ModelHarness() {
                 <a href="https://github.com/masralai/nexus" target="_blank" className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900 px-5 py-2.5 font-mono text-[12px] text-zinc-300 hover:bg-zinc-800 transition-colors">View docs <CaretRight size={12} /></a>
               </div>
             </div>
-            <div className="bg-zinc-900 border-t lg:border-t-0 lg:border-l border-zinc-800 p-4 lg:p-6 flex flex-col gap-4">
-              <img src="https://picsum.photos/seed/nexus-harness/840/620" alt="Developer working at desk with multiple monitors" className="w-full h-[380px] object-cover rounded-xl border border-zinc-800" />
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 flex items-center justify-between">
-                <div className="font-mono text-[11px] text-zinc-400">
-                  <div className="text-zinc-100">Turn launcher single seam</div>
-                  <div className="mt-1 text-zinc-500">CLI and shell share one path</div>
-                </div>
-                <span className="rounded-full bg-cyan-400 px-3 py-1 font-mono text-[11px] font-semibold text-zinc-950">Active</span>
+            <div className="bg-zinc-900 border-t lg:border-t-0 lg:border-l border-zinc-800 p-4 lg:p-6 flex flex-col gap-4" role="img" aria-label="Developer working at desk with multiple monitors">
+              <div className="rounded-xl border border-zinc-800 overflow-hidden">
+                <HarnessTerminal />
               </div>
             </div>
           </div>
@@ -367,12 +355,8 @@ function OpenSource() {
             </div>
           </div>
           <div className="lg:col-span-6 lg:pl-8">
-            <div className="rounded-2xl border border-zinc-800 bg-[#09090b] overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
-                <span className="font-mono text-[11px] tracking-wide text-zinc-500">github.com/masralai/nexus</span>
-                <span className="font-mono text-[11px] text-zinc-600">public</span>
-              </div>
-              <img src="https://picsum.photos/seed/nexus-opensource/860/520" alt="Code editor showing open source repository" className="w-full h-[320px] object-cover opacity-90" />
+            <div className="rounded-2xl border border-zinc-800 bg-[#09090b] overflow-hidden" role="img" aria-label="Code editor showing open source repository">
+              <OpenSourceTerminal />
               <div className="px-4 py-4 grid grid-cols-3 divide-x divide-zinc-800 border-t border-zinc-800 bg-zinc-900">
                 <div className="px-2">
                   <div className="font-mono text-[11px] text-zinc-500">Bun</div>
