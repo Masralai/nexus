@@ -22,6 +22,7 @@ export interface TUIState {
   permission: PermissionRequest | null
   done: boolean
   aborted: boolean
+  stepLimit: boolean
   error?: string
 }
 
@@ -33,6 +34,7 @@ export function initialTUIState(model: string): TUIState {
     permission: null,
     done: false,
     aborted: false,
+    stepLimit: false,
   }
 }
 
@@ -68,8 +70,13 @@ export function reduceEvent(s: TUIState, ev: EngineEvent): TUIState {
         lines: s.assistantOutput ? [...s.lines, s.assistantOutput] : s.lines,
         assistantOutput: "",
         done: true,
+        stepLimit: s.stepLimit || ev.reason === "step_limit",
         status: { ...s.status, steps: ev.steps },
       }
+    case "usage":
+      return s
+    case "stepLimit":
+      return { ...s, stepLimit: true, lines: [...s.lines, `step limit reached (${ev.steps})`] }
     case "error":
       return { ...s, done: true, error: ev.message }
     case "aborted":
@@ -84,6 +91,7 @@ export function settleTurnView(s: TUIState, ev: EngineEvent): TUIState {
     status: ev.type === "runComplete" ? { ...s.status, steps: ev.steps } : s.status,
     error: ev.type === "error" ? ev.message : undefined,
     aborted: ev.type === "aborted",
+    stepLimit: s.stepLimit || (ev.type === "runComplete" && ev.reason === "step_limit"),
     done: true,
   }
 }

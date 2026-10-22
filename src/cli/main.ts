@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { JSONLStore } from "../engine/state"
+import { defaultLegacySessionsDir, openSessionStore } from "../engine/store"
 import { makeProvider, parseFlags, runSession, selfTest } from "./run"
 import { runShell } from "../tui"
 
@@ -22,7 +22,7 @@ switch (cmd) {
       console.error("usage: nexus resume <id> [--model <m>] [--yes]")
       process.exit(1)
     }
-    const store = new JSONLStore()
+    const store = openSessionStore()
     const loaded = store.load(id)
     process.exit(
       await runSession({
@@ -37,6 +37,14 @@ switch (cmd) {
       }),
     )
   }
+  case "migrate": {
+    const store = openSessionStore()
+    const imported = store.importLegacy(rest[0] ?? defaultLegacySessionsDir())
+    store.setKv("legacy_jsonl_imported_v1", new Date().toISOString())
+    console.log(`imported ${imported} session(s) into ${store.path}`)
+    store.close()
+    break
+  }
   case "self-test": {
     const { provider } = makeProvider(model)
     process.exit(await selfTest(provider))
@@ -49,6 +57,7 @@ switch (cmd) {
       `usage: nexus                    # interactive shell
        nexus run "task" [--model <m>] [--yes]
        nexus resume <id> [--model <m>] [--yes]
+       nexus migrate [jsonl-dir]         # one-time legacy import
        nexus self-test [--model <m>]
        nexus --help`,
     )

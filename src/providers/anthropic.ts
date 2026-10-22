@@ -1,13 +1,18 @@
 import type { Message, ToolDefinition } from "../engine/types"
-import type { Provider, ProviderEvent, StreamOptions } from "./types"
-import { parseArgs } from "./openai-compatible"
+import type { Provider, ProviderEvent, StreamOptions, Usage } from "./types"
+import { fetchWithRetry, requestSignal } from "./retry"
 import { readSSE } from "./sse"
+
+const DEFAULT_TIMEOUT_MS = 120_000
 
 export interface AnthropicConfig {
   apiKey: string
   model: string
   contextWindow: number
+  /** Anthropic requires an output token limit on every request. */
   maxTokens?: number
+  /** Wall-clock limit for one streaming request. Timeouts stay distinct from aborts. */
+  timeoutMs?: number
   fetchImpl?: typeof fetch
 }
 
@@ -32,6 +37,7 @@ function mark(m: AnthropicMessage): void {
 export function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
   const out: AnthropicMessage[] = []
   for (const m of messages) {
+    if (m.role === "assistant" && m.content === null && !(m.toolCalls?.length)) continue
     if (m.role === "user") {
       out.push({ role: "user", content: m.content })
     } else if (m.role === "assistant") {
@@ -54,57 +60,59 @@ export function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
 export class Anthropic implements Provider {
   readonly id = "anthropic"
   readonly contextWindow: number
+  readonly maxOutputTokens: number
   readonly supportsCaching = true
   private fetchImpl: typeof fetch
 
   constructor(private cfg: AnthropicConfig) {
     this.contextWindow = cfg.contextWindow
+    this.maxOutputTokens = cfg.maxTokens ?? 8_192
     this.fetchImpl = cfg.fetchImpl ?? fetch
   }
 
-  private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
-    const maxRetries = 1
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const res = await this.fetchImpl(url, init)
-      if (res.ok) return res
-      const retryable = res.status === 429 || res.status === 503 || res.status === 502
-      if (!retryable || attempt === maxRetries) {
-        throw new Error(`anthropic: HTTP ${res.status}: ${(await res.text()).slice(0, 500)}`)
-      }
-      const retryAfter = res.headers.get("retry-after")
-      const delayMs = retryAfter ? Number(retryAfter) * 1000 : 500 * Math.pow(2, attempt)
-      if (init.signal?.aborted) throw new Error("aborted")
-      await new Promise((r) => setTimeout(r, Math.min(delayMs, 5000)))
-    }
-    throw new Error("anthropic: retry exhausted")
-  }
-
   async *stream(messages: Message[], tools: ToolDefinition[], opts: StreamOptions): AsyncIterable<ProviderEvent> {
-    const res = await this.fetchWithRetry("https://api.anthropic.com/v1/messages", {
+    const signal = requestSignal(opts.signal, opts.timeoutMs ?? this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+    const res = await fetchWithRetry(this.fetchImpl, "anthropic", "https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": this.cfg.apiKey, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({
+        ...(opts.params ?? {}),
         model: this.cfg.model,
-        ...(this.cfg.maxTokens ? { max_tokens: this.cfg.maxTokens } : {}),
+        max_tokens: this.maxOutputTokens,
+        ...(opts.system ? { system: opts.system } : {}),
         stream: true,
         tools: tools.length ? tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.schema })) : undefined,
         messages: toAnthropicMessages(messages),
       }),
-      signal: opts.signal,
-    })
+      signal,
+    }, [429, 502, 503, 529])
 
     const toolAcc = new Map<number, { id?: string; name?: string; input: string }>()
+    const usage: Usage = { inputTokens: 0, outputTokens: 0 }
     let content = ""
-    let stopReason: string | null = null
     for await (const { event, data } of readSSE(res.body)) {
       if (!data) continue
-      let ev: { index?: number; content_block?: { type: string; id?: string; name?: string; input?: unknown }; delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string } }
+      let ev: {
+        index?: number
+        message?: { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }
+        content_block?: { type: string; id?: string; name?: string; input?: unknown }
+        delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string; usage?: { output_tokens?: number } }
+        usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
+      }
       try {
         ev = JSON.parse(data)
       } catch {
         continue
       }
-      if (event === "content_block_start") {
+      if (event === "message_start") {
+        const start = ev.message?.usage
+        const cacheRead = start?.cache_read_input_tokens ?? 0
+        const cacheWrite = start?.cache_creation_input_tokens ?? 0
+        // Anthropic reports uncached input separately; normalize to total prompt tokens.
+        usage.inputTokens = (start?.input_tokens ?? 0) + cacheRead + cacheWrite
+        usage.cacheReadTokens = cacheRead || undefined
+        usage.cacheWriteTokens = cacheWrite || undefined
+      } else if (event === "content_block_start") {
         const cb = ev.content_block
         if (cb?.type === "tool_use") toolAcc.set(ev.index ?? 0, { id: cb.id, name: cb.name, input: "" })
       } else if (event === "content_block_delta") {
@@ -117,7 +125,8 @@ export class Anthropic implements Provider {
           if (acc && d.partial_json) acc.input += d.partial_json
         }
       } else if (event === "message_delta") {
-        stopReason = ev.delta?.stop_reason ?? null
+        if (ev.delta?.usage?.output_tokens !== undefined) usage.outputTokens = ev.delta.usage.output_tokens
+        else if (ev.usage?.output_tokens !== undefined) usage.outputTokens = ev.usage.output_tokens
       }
     }
 
@@ -133,9 +142,8 @@ export class Anthropic implements Provider {
         return { id: a.id ?? "", name: a.name ?? "", input: parsed }
       })
       .filter((c) => c.name)
-    if (calls.length > 0) {
-      for (const c of calls) yield { type: "toolCall", ...c }
-    }
-    yield { type: "done", content: content || null }
+    for (const c of calls) yield { type: "toolCall", ...c }
+    const hasUsage = usage.inputTokens > 0 || usage.outputTokens > 0
+    yield { type: "done", content: content || null, ...(hasUsage ? { usage } : {}) }
   }
 }

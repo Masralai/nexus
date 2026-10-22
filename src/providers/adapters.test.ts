@@ -69,6 +69,16 @@ test("openai: toChatMessages is lossless for canonical messages", () => {
   ])
 })
 
+test("empty assistant messages are omitted from both protocols", () => {
+  const msgs: Message[] = [
+    { role: "user", content: "hi" },
+    { role: "assistant", content: null },
+    { role: "user", content: "again" },
+  ]
+  expect(toChatMessages(msgs).map((m) => m.role)).toEqual(["user", "user"])
+  expect(toAnthropicMessages(msgs).map((m) => m.role)).toEqual(["user", "user"])
+})
+
 test("anthropic: streams text tokens then done", async () => {
   const p = new Anthropic({
     apiKey: "k",
@@ -106,4 +116,43 @@ test("anthropic: adds cache_control breakpoints to messages[1] and the last mess
   expect(out[0].content).toBe("u0")
   expect((out[1].content as { cache_control?: unknown }[])[0].cache_control).toEqual({ type: "ephemeral" })
   expect((out[2].content as { cache_control?: unknown }[])[0].cache_control).toEqual({ type: "ephemeral" })
+})
+
+test("anthropic: always sends max_tokens and the native system channel", async () => {
+  let body: Record<string, unknown> | undefined
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    body = JSON.parse(String(init.body))
+    return new Response(fixture("anthropic", "text-stream.sse"), { status: 200 })
+  }) as unknown as typeof fetch
+  const p = new Anthropic({ apiKey: "k", model: "m", contextWindow: 200_000, fetchImpl })
+  await collect(p.stream([{ role: "user", content: "hi" }], emptyTools, { system: "SYS" }))
+  expect(body?.max_tokens).toBe(8_192)
+  expect(body?.system).toBe("SYS")
+  expect((body?.messages as { role: string; content: unknown }[])[0]).toEqual({
+    role: "user",
+    content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }],
+  })
+})
+
+test("openai: sends system first and parses streamed usage", async () => {
+  let body: Record<string, unknown> | undefined
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"Hi"}}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":1}}}',
+    "data: [DONE]",
+    "",
+  ].join("\n\n")
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    body = JSON.parse(String(init.body))
+    return new Response(sse, { status: 200 })
+  }) as unknown as typeof fetch
+  const p = new OpenAICompatible({ apiKey: "k", model: "m", contextWindow: 8_000, fetchImpl })
+  const evts = await collect(p.stream([{ role: "user", content: "hi" }], emptyTools, { system: "SYS" }))
+  expect(body?.stream_options).toEqual({ include_usage: true })
+  expect((body?.messages as { role: string; content: unknown }[])[0]).toEqual({ role: "system", content: "SYS" })
+  expect(evts.at(-1)).toEqual({
+    type: "done",
+    content: "Hi",
+    usage: { inputTokens: 10, outputTokens: 2, reasoningTokens: 1, cacheReadTokens: 4 },
+  })
 })

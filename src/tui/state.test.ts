@@ -35,6 +35,13 @@ test("runComplete marks done and updates status", () => {
   expect(s.status).toEqual({ used: 100, limit: 8000, pct: 0.0125, steps: 3, model: "m" })
 })
 
+test("step exhaustion is not treated as success", () => {
+  let s = initialTUIState("m")
+  s = reduceEvent(s, { type: "stepLimit", steps: 50 })
+  s = reduceEvent(s, { type: "runComplete", steps: 50, result: "", reason: "step_limit" })
+  expect(s).toMatchObject({ done: true, stepLimit: true, aborted: false })
+})
+
 test("error and abort terminal states", () => {
   let s = initialTUIState("m")
   s = reduceEvent(s, { type: "error", message: "boom" })

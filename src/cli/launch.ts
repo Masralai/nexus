@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto"
 import { run, type RunConfig } from "../engine/loop"
 import type { AgentMode } from "../engine/mode"
-import { JSONLStore } from "../engine/state"
+import { openSessionStore, type SessionStore } from "../engine/store"
 import type { EngineEvent, Message, Tool } from "../engine/types"
+import { EventBus } from "../engine/bus"
+import { PluginRegistry } from "../plugins/hooks"
 import { createProvider } from "../providers"
 import type { Provider } from "../providers/types"
 import type { Skill } from "../skills"
@@ -14,34 +16,43 @@ export interface Runtime {
   provider: Provider
   compactProvider: Provider
   registry: Map<string, Tool>
-  store: JSONLStore
+  store: SessionStore
+  bus?: EventBus<EngineEvent>
+  plugins?: PluginRegistry
 }
 
 export interface LaunchOpts {
   model?: string
-  store?: JSONLStore
+  store?: SessionStore
   tools?: Tool[]
+  cwd?: string
+  plugins?: PluginRegistry
 }
 
 /** Turn launcher: provider, compact provider, tool registry, config, store. */
 export function launchRuntime(opts: LaunchOpts = {}): Runtime {
-  const cfg = loadConfig({ model: opts.model })
-  const apiKey = resolveApiKey(cfg)
+  const cwd = opts.cwd ?? process.cwd()
+  const cfg = loadConfig({ model: opts.model, cwd })
+  const plugins = opts.plugins ?? new PluginRegistry()
+  // BYOK resolution wins; plugins may supply an auth method as a fallback.
+  const apiKey = resolveApiKey(cfg) ?? plugins.auth(cfg.provider)?.apiKey
   const common = {
     provider: cfg.provider,
     apiKey,
-    baseUrl: cfg.baseUrl ?? process.env.OPENAI_BASE_URL,
+    baseUrl: cfg.baseUrl,
   }
-  const tools = opts.tools ?? defaultTools()
+  const tools = plugins.tools(opts.tools ?? defaultTools(), { cwd })
   return {
     cfg,
     provider: createProvider({ ...common, model: cfg.model }),
     compactProvider: createProvider({
       ...common,
-      model: cfg.compactModel || defaultCompactModel(cfg.provider),
+      model: cfg.compactModel || defaultCompactModel(cfg.preset, cfg.provider, cfg.model),
     }),
     registry: new Map(tools.map((t) => [t.name, t])),
-    store: opts.store ?? new JSONLStore(),
+    store: opts.store ?? openSessionStore(),
+    bus: new EventBus<EngineEvent>(),
+    plugins,
   }
 }
 
@@ -63,12 +74,15 @@ export interface TurnOpts {
 
 /** Start a Turn via the launcher seam. */
 export async function* runTurn(opts: TurnOpts): AsyncIterable<EngineEvent> {
-  const rt = opts.runtime ?? launchRuntime({ model: opts.model })
+  const cwd = opts.cwd ?? process.cwd()
+  const rt = opts.runtime ?? launchRuntime({ model: opts.model, cwd })
   const sessionId = opts.sessionId ?? randomUUID()
-  yield* run(opts.messages, {
+  const pluginCtx = { cwd, sessionId }
+  const providerParams = rt.plugins?.chatParams({}, pluginCtx)
+  const events = run(opts.messages, {
     provider: rt.provider,
     registry: rt.registry,
-    cwd: opts.cwd ?? process.cwd(),
+    cwd,
     model: opts.model ?? (rt.cfg.model || "(default)"),
     maxSteps: opts.maxSteps ?? rt.cfg.maxSteps,
     store: rt.store,
@@ -80,7 +94,15 @@ export async function* runTurn(opts: TurnOpts): AsyncIterable<EngineEvent> {
     skills: opts.skills,
     compactProvider: rt.compactProvider,
     compactThreshold: opts.compactThreshold ?? rt.cfg.compactThreshold,
+    providerParams,
+    onPermission: rt.plugins ? (req) => rt.plugins!.permission(req, pluginCtx) : undefined,
     askPermission: opts.askPermission,
     rules: rt.cfg.permission,
+    instructionPaths: rt.cfg.instructions,
   })
+  for await (const event of events) {
+    rt.bus?.publish(event)
+    rt.plugins?.emit(event, pluginCtx)
+    yield event
+  }
 }

@@ -28,7 +28,7 @@
 
 ## Overview
 
-Nexus is a BYOK agent harness that runs **Turns** against a **Provider** with an optional workspace **Tool** layer and durable **Sessions**. It is not a hosted platform — your terminal is the interface, your keys stay local, and every session is a plain JSONL file you can grep, pipe, or resume.
+Nexus is a BYOK agent harness that runs **Turns** against a **Provider** with an optional workspace **Tool** layer and durable **Sessions**. It is not a hosted platform — your terminal is the interface, your keys stay local, and sessions live in a local SQLite database with typed message parts.
 
 Use it as an interactive shell for day-to-day coding or as a headless one-shot runner in CI. The same **Turn launcher** powers both (`src/cli/launch.ts:27`).
 
@@ -37,12 +37,12 @@ Use it as an interactive shell for day-to-day coding or as a headless one-shot r
 
 ## Features
 
-- **Model-agnostic** — OpenAI, Anthropic, Gemini, OpenRouter, Groq, DeepSeek, Ollama via one config (`src/providers/presets.ts:13`)
+- **Model-agnostic** — Anthropic, OpenAI, Gemini, OpenRouter, Groq, DeepSeek, xAI, Mistral, Cohere, Ollama via one config (`src/providers/presets.ts`)
 - **Two agent modes** — `plan` (read-only, auto-allowed) and `build` (full tools with approval)
 - **Permission gate** — readonly tools inside the session cwd are auto-allowed; `write`/`edit`/`bash` and paths outside cwd always ask (`src/engine/permission.ts:17`)
 - **Six focused tools** — `read`, `write`, `edit`, `bash`, `list`, `glob`, `grep` (`src/tools/index.ts:160`)
-- **Durable sessions** — JSONL under `~/.nexus/sessions/` with `create`/`append`/`resume` (`src/engine/state.ts:27`)
-- **Context assembly + compaction** — prompt-only truncation and LLM summarization when the budget exceeds threshold (`src/engine/context.ts:57`)
+- **Durable sessions** — SQLite at `~/.nexus/nexus.db` with typed parts and a one-time legacy JSONL import (`src/engine/sqlite.ts`, `nexus migrate`)
+- **Real prompt architecture** — policy and environment in the provider system channel, layered `AGENTS.md` discovery, per-tool truncation, and pairing-safe compaction (`src/engine/prompt.ts`, `src/engine/instructions.ts`, `src/engine/compact.ts`)
 - **Skills** — reusable instruction packs from `.agents/skills` injected into context (`src/skills/index.ts:87`)
 - **Ink TUI** — live turn view, stream viewport, mouse wheel scroll, permission picker (`src/tui/shell.tsx:44`)
 
@@ -169,7 +169,7 @@ nexus resume <session-id> --yes
 nexus self-test --model claude-sonnet-4-20250514
 ```
 
-Exit codes: `0` done, `1` error, `2` aborted (`src/cli/run.ts:56`).
+Exit codes: `0` done, `1` error, `2` aborted, `3` step limit reached (`src/cli/run.ts`). A step-limited session is persisted with status `limit`.
 
 `--yes` (or piping / non-TTY) auto-approves permission asks. Without it, the gate yields `permissionRequest` events and the TUI shows a picker (`src/tui/permission-gate.tsx`).
 
@@ -181,7 +181,7 @@ nexus resume 5467a7c8-...          # exact session id
 /resume                            # picker sorted by createdAt desc
 ```
 
-Sessions are JSONL: `~/.nexus/sessions/<id>.jsonl` with `meta`, `msg`, `status` lines (`src/engine/state.ts:16`). Copy or version them like any file.
+Sessions live in SQLite at `~/.nexus/nexus.db` (override with `NEXUS_DB`). Each message is stored as typed parts (`text`, `tool_call`, `tool_result`, `compaction`). Existing JSONL sessions are imported once with `nexus migrate [dir]` (default `~/.nexus/sessions`).
 
 ## Configuration
 
@@ -203,13 +203,13 @@ Sessions are JSONL: `~/.nexus/sessions/<id>.jsonl` with `meta`, `msg`, `status` 
 
 | Field | Env override | Default |
 |-------|--------------|---------|
-| `provider` | `NEXUS_PROVIDER` | `openai-compatible` |
+| `provider` | `NEXUS_PROVIDER` (custom presets only) | derived from preset |
 | `preset` | `NEXUS_PRESET` | `openai` |
 | `model` | `NEXUS_MODEL` / `--model` | `""` (provider default) |
 | `maxSteps` | `NEXUS_MAX_STEPS` | `50` |
-| `compactModel` | `NEXUS_COMPACT_MODEL` | `gpt-4o-mini` / `claude-3-5-haiku-latest` for Anthropic |
+| `compactModel` | `NEXUS_COMPACT_MODEL` | smallest suggested model for the active preset |
 | `compactThreshold` | `NEXUS_COMPACT_THRESHOLD` | `0.8` |
-| `baseUrl` | `OPENAI_BASE_URL` | per preset |
+| `baseUrl` | `NEXUS_BASE_URL` (custom endpoints) | per preset |
 
 ### Presets and providers
 
@@ -238,12 +238,14 @@ Sessions are JSONL: `~/.nexus/sessions/<id>.jsonl` with `meta`, `msg`, `status` 
 }
 ```
 
-Resolution order per preset `envKeys` (`src/cli/config.ts:86`): env var first (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, etc.), then credentials file. The `mock` provider needs no key.
+Resolution order per preset `envKeys`: env var first (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, etc.), then credentials file. Keys are scoped to the active preset and never borrowed across providers. The `mock` provider needs no key.
+
+**Instructions.** Discovery loads global `AGENTS.md`, then project files from the repository root toward the working directory, plus `@`-imports and configured `instructions` paths/URLs. Relative configured paths resolve from the `.nexus.json` that declared them. Auto-discovery of nearby subtree `AGENTS.md` files when a file is read is planned for M3.
 
 ## Architecture
 
 ```
-Session (JSONL) ──► Turn launcher (src/cli/launch.ts:27) ──► Turn (src/engine/loop.ts:58)
+Session (SQLite) ──► Turn launcher (src/cli/launch.ts) ──► Turn (src/engine/loop.ts)
                         │ provider + compactProvider               │
                         │ registry (Tools)                         │ stream tokens + toolCalls
                         │ config + store                           ▼
@@ -255,14 +257,14 @@ Session (JSONL) ──► Turn launcher (src/cli/launch.ts:27) ──► Turn (s
                                                           Context assembly + maybeCompact
 ```
 
-A **Session** holds many **Messages** and is advanced by **Turns**. Each Turn assembles a prompt from working memory (`src/engine/context.ts:17`), streams from the Provider, gates every tool call, executes all Tool calls in parallel in one step (optimistic, provider-ordered) (`src/engine/loop.ts:168`), and appends results durably.
+A **Session** holds many **Messages** and is advanced by **Turns**. Each Turn builds a system channel from policy, environment, instructions, and skills, streams from the Provider with the durable history, gates every tool call, executes all Tool calls in parallel in one step (optimistic, provider-ordered), and appends results as typed parts.
 
 Key seams:
 
 - **Turn launcher** — single place that builds provider, compact provider, registry, and store (shared by shell and CLI).
 - **Permission gate** — single decision per tool call (`decide()` + `gateToolCall()`); readonly inside cwd → allow, `bash`/outside cwd → ask, denied tools → deny.
 - **Agent mode** — `plan` advertises only readonly tools and denies `write`/`edit`/`bash` (`src/engine/mode.ts:6`); `build` advertises all.
-- **Context assembly** — working memory + skill blocks + truncation are prompt-only; durable history is never mutated except by compaction.
+- **Prompt assembly** — the system channel + per-tool truncation are prompt-only; durable history is never mutated except by compaction.
 
 ## Tools
 
@@ -293,18 +295,16 @@ Toggle with `/plan` `/build` or `Shift+Tab` in the shell, or `mode` in `runTurn(
 
 ## Sessions and skills
 
-**Sessions** are append-only JSONL (`src/engine/state.ts:30`):
+**Sessions** are append-only rows in SQLite (`src/engine/sqlite.ts`):
 
 ```
-~/.nexus/sessions/<uuid>.jsonl
-  {"type":"meta","session":{"id","cwd","model","provider","createdAt"}}
-  {"type":"msg","msg":{"role":"user","content":"..."}}
-  {"type":"msg","msg":{"role":"assistant","content":"...","toolCalls":[...]}}
-  {"type":"msg","msg":{"role":"tool","toolCallId":"...","result":{"ok":true,"output":"..."}}}
-  {"type":"status","status":"done"}
+sessions         id, cwd, model, provider, title, status, created_at
+session_parts    session_id, message_id, seq, part_type, data, message_json
 ```
 
-**Skills** are `SKILL.md` files with optional YAML frontmatter (`name`, `description`). Active skills are concatenated (capped at 12k chars each) and injected into working memory for every Turn step (`src/skills/index.ts:112`).
+Status is one of `running`, `done`, `aborted`, `error`, or `limit` (step limit reached). Compaction summaries are stored as synthetic `compaction` parts.
+
+**Skills** are `SKILL.md` files with optional YAML frontmatter (`name`, `description`). Active skills are concatenated (capped at 12k chars each) into the system prompt for every Turn step (`src/skills/index.ts`).
 
 ## Project structure
 
@@ -312,7 +312,7 @@ Toggle with `/plan` `/build` or `Shift+Tab` in the shell, or `mode` in `runTurn(
 nexus/
 ├── src/
 │   ├── cli/          # main.ts, launch.ts (turn launcher), config.ts, credentials.ts, run.ts
-│   ├── engine/       # loop.ts, state.ts (JSONL), context.ts, compact.ts, permission.ts, mode.ts, types.ts
+│   ├── engine/       # loop.ts, sqlite.ts, schema.ts, migrations.ts, prompt.ts, instructions.ts, context.ts, compact.ts, permission.ts, mode.ts, types.ts
 │   ├── providers/    # index.ts, presets.ts, anthropic.ts, openai-compatible.ts, mock.ts, sse.ts
 │   ├── tools/        # index.ts (read/write/edit/bash/list/glob/grep)
 │   ├── skills/       # index.ts (discover/format/filter)

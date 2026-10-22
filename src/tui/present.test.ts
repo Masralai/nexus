@@ -344,7 +344,7 @@ test("slash highlight wraps", () => {
   expect(c.slashIdx).toBe(2)
 })
 
-test("scrollStep returns opencode-parity sizes", () => {
+test("scrollStep returns expected sizes", () => {
   expect(scrollStep("wheel", 10)).toBe(3)
   expect(scrollStep("wheel", 30)).toBe(3)
   expect(scrollStep("ctrl", 10)).toBe(5)

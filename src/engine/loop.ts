@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto"
-import type { Provider } from "../providers/types"
-import { assemblePrompt, budgetPct, budgetUsed, maybeCompact } from "./context"
+import type { Provider, Usage } from "../providers/types"
+import { estimateCost, getModelInfo } from "../providers/catalog"
+import { approxTextTokens, buildPrompt, budgetPct, budgetUsed, maybeCompact } from "./context"
 import { advertiseTools, modePolicy, isReadonlyTool, type AgentMode } from "./mode"
 import { gateToolCall, reasonForCall, type PermissionRules } from "./permission"
-import { buildRepoMap } from "./repo-map"
-import type { JSONLStore } from "./state"
-import type { EngineEvent, Message, Tool, ToolCall, ToolContext, ToolResult } from "./types"
+import { discoverInstructionsWithUrls, type InstructionFile } from "./instructions"
+import { renderSystemPrompt, gitSummary } from "./prompt"
+import type { EngineEvent, Message, SessionStore, Tool, ToolCall, ToolContext, ToolResult } from "./types"
 import type { Skill } from "../skills"
 
 export interface RunConfig {
@@ -14,7 +15,7 @@ export interface RunConfig {
   cwd: string
   model: string
   maxSteps: number
-  store?: JSONLStore
+  store?: SessionStore
   sessionId?: string
   signal?: AbortSignal
   /** Extra rules merged on top of agent-mode policy. */
@@ -25,8 +26,16 @@ export interface RunConfig {
   compactThreshold?: number
   keepRecent?: number
   mode?: AgentMode
-  /** Active agent skills injected into working memory. */
+  /** Active agent skills injected into the system channel. */
   skills?: Skill[]
+  /** Preloaded instruction files. When omitted, AGENTS.md discovery runs for cwd. */
+  instructions?: InstructionFile[]
+  /** Additional instruction files from config. */
+  instructionPaths?: string[]
+  /** Plugin-provided provider request parameters. */
+  providerParams?: Record<string, unknown>
+  /** Observe each permission decision without changing it. */
+  onPermission?: (req: { name: string; input: unknown; granted: boolean }) => void
   askPermission?: (req: { id: string; name: string; input: unknown; reason: string }) => Promise<boolean>
   depth?: number
   maxDepth?: number
@@ -40,7 +49,7 @@ function mergeRules(base: PermissionRules, extra?: PermissionRules): PermissionR
     askTools: [...(base.askTools ?? []), ...(extra.askTools ?? [])],
     denyPatterns: [...(base.denyPatterns ?? []), ...(extra.denyPatterns ?? [])],
   }
-  // granular opencode fields: extra overwrites base if defined
+  // granular permission fields: extra overwrites base if defined
   for (const [k, v] of Object.entries(extra)) {
     if (["allowTools", "denyTools", "askTools", "denyPatterns"].includes(k)) continue
     if (v !== undefined) (merged as Record<string, unknown>)[k] = v
@@ -66,6 +75,11 @@ function unpersisted(caller: readonly Message[], persisted: readonly Message[]):
     else remaining.splice(idx, 1)
   }
   return incoming
+}
+
+function isAbort(e: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true
+  return e instanceof Error && (e.name === "AbortError" || /aborted/i.test(e.message))
 }
 
 export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncIterable<EngineEvent> {
@@ -94,15 +108,31 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
     working = messages.slice()
   }
 
+  const instructions =
+    cfg.instructions ??
+    (await discoverInstructionsWithUrls({ cwd, extra: cfg.instructionPaths }))
+
+  const system = renderSystemPrompt({
+    mode,
+    skills: cfg.skills,
+    instructions,
+    tools: [...registry.values()],
+    environment: {
+      cwd,
+      platform: `${process.platform} ${process.arch}`,
+      date: new Date().toISOString().slice(0, 10),
+      model,
+      provider: provider.id,
+      // Sub-agents inherit the parent's workspace state; don't shell out per child.
+      git: depth === 0 ? await gitSummary(cwd) : undefined,
+    },
+  })
+  const systemTokens = approxTextTokens(system)
+
   let steps = 0
   let result = ""
+  let limitHit = false
   const doomCounts = new Map<string, number>()
-  let repoMap: string | undefined
-  try {
-    repoMap = await buildRepoMap(cwd)
-  } catch {
-    repoMap = undefined
-  }
 
   try {
     while (true) {
@@ -111,7 +141,10 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
         yield { type: "aborted" }
         return
       }
-      if (steps >= maxSteps) break
+      if (steps >= maxSteps) {
+        limitHit = true
+        break
+      }
 
       if (cfg.compactProvider) {
         try {
@@ -120,14 +153,21 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
             threshold,
             keepRecent,
             limit,
+            systemTokens,
+            params: cfg.providerParams,
           })
           if (compacted) {
             working = compacted
-            // Persist hidden-agent compaction summary so resume retains continuity (opencode parity)
-            try {
-              store?.append(sessionId, compacted[0])
-            } catch { /* ignore persistence errors */ }
-            yield { type: "contextUpdate", used: budgetUsed(working), limit, pct: budgetPct(working, limit) }
+            // Persist only the synthetic summary, never a re-appended user request.
+            const summary = compacted[0]
+            if (summary?.role === "user" && summary.synthetic === "compaction") {
+              try {
+                store?.append(sessionId, summary)
+              } catch {
+                /* persistence is best-effort here */
+              }
+            }
+            yield { type: "contextUpdate", used: budgetUsed(working, systemTokens), limit, pct: budgetPct(working, limit, systemTokens) }
           }
         } catch {
           // skip compaction; continue with truncation-only
@@ -135,17 +175,35 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
       }
 
       const toolDefs = advertiseTools(registry, mode)
-      const prompt = assemblePrompt(working, mode, cfg.skills ?? [], repoMap)
-      const stream = provider.stream(prompt, toolDefs, { signal: cfg.signal })
+      const prompt = buildPrompt(working, system)
+      const stream = provider.stream(prompt.messages, toolDefs, {
+        signal: cfg.signal,
+        system: prompt.system,
+        params: cfg.providerParams,
+      })
 
       let content: string | null = null
       const calls: ToolCall[] = []
+      let stepUsage: Usage | undefined
       for await (const ev of stream) {
         if (ev.type === "token") yield { type: "tokenDelta", delta: ev.text }
         else if (ev.type === "toolCall") {
           calls.push({ id: ev.id, name: ev.name, input: ev.input })
           yield { type: "toolCallStarted", id: ev.id, name: ev.name, input: ev.input }
-        } else if (ev.type === "done") content = ev.content
+        } else if (ev.type === "done") {
+          content = ev.content
+          stepUsage = ev.usage
+        }
+      }
+
+      if (stepUsage) {
+        yield { type: "usage", usage: stepUsage, cost: estimateCost(getModelInfo(model), stepUsage) }
+      }
+
+      if (cfg.signal?.aborted) {
+        store?.setStatus(sessionId, "aborted")
+        yield { type: "aborted" }
+        return
       }
 
       working.push({ role: "assistant", content, toolCalls: calls.length > 0 ? calls : undefined })
@@ -153,7 +211,7 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
 
       if (calls.length === 0) {
         result = content ?? ""
-        yield { type: "contextUpdate", used: budgetUsed(working), limit, pct: budgetPct(working, limit) }
+        yield { type: "contextUpdate", used: budgetUsed(working, systemTokens), limit, pct: budgetPct(working, limit, systemTokens) }
         yield { type: "turnComplete", step: steps }
         break
       }
@@ -173,6 +231,7 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
           const doomDecision = rules.doom_loop ?? "ask"
           if (doomDecision === "deny") {
             grants.set(call.id, false)
+            cfg.onPermission?.({ name: call.name, input: call.input, granted: false })
             yield { type: "permissionRequest", id: call.id, name: call.name, input: call.input, reason: `doom_loop: repeated ${call.name} 3x` }
             continue
           }
@@ -183,6 +242,7 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
             if (cfg.askPermission) granted = await cfg.askPermission(req)
             else granted = cfg.autoApprove ?? false
             grants.set(call.id, granted)
+            cfg.onPermission?.({ name: call.name, input: call.input, granted })
             continue
           }
         }
@@ -201,12 +261,14 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
         })
         for (const req of askEvents) yield { type: "permissionRequest", ...req }
         grants.set(call.id, granted)
+        cfg.onPermission?.({ name: call.name, input: call.input, granted })
       }
 
       const exec = async (call: ToolCall): Promise<ToolResult> => {
         const tool = registry.get(call.name)
         if (!tool) return { ok: false, output: "", error: `unknown tool: ${call.name}` }
         if (!grants.get(call.id)) return { ok: false, output: "", error: "permission denied" }
+        if (cfg.signal?.aborted) return { ok: false, output: "", error: "aborted" }
         const ctx: ToolContext = {
           cwd,
           signal: cfg.signal,
@@ -231,7 +293,7 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
       }
 
       const results = new Map<string, ToolResult>()
-      // opencode optimistic parallel: all Tool calls in one step run concurrently
+      // optimistic parallel: all Tool calls in one step run concurrently
       await Promise.all(calls.map(async (c) => results.set(c.id, await exec(c))))
 
       for (const call of calls) {
@@ -242,13 +304,25 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
       }
 
       steps++
-      yield { type: "contextUpdate", used: budgetUsed(working), limit, pct: budgetPct(working, limit) }
+      yield { type: "contextUpdate", used: budgetUsed(working, systemTokens), limit, pct: budgetPct(working, limit, systemTokens) }
       yield { type: "turnComplete", step: steps }
+    }
+
+    if (limitHit) {
+      yield { type: "stepLimit", steps }
+      yield { type: "runComplete", steps, result, reason: "step_limit" }
+      store?.setStatus(sessionId, "limit")
+      return
     }
 
     yield { type: "runComplete", steps, result }
     store?.setStatus(sessionId, "done")
   } catch (e) {
+    if (isAbort(e, cfg.signal)) {
+      store?.setStatus(sessionId, "aborted")
+      yield { type: "aborted" }
+      return
+    }
     yield { type: "error", message: e instanceof Error ? e.message : String(e) }
     store?.setStatus(sessionId, "error")
   }

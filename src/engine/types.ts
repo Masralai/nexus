@@ -1,3 +1,5 @@
+import type { Provider, Usage } from "../providers/types"
+
 export interface ToolCall {
   id: string
   name: string
@@ -11,7 +13,7 @@ export interface ToolResult {
 }
 
 export type Message =
-  | { role: "user"; content: string }
+  | { role: "user"; content: string; synthetic?: "compaction" }
   | { role: "assistant"; content: string | null; toolCalls?: ToolCall[] }
   | { role: "tool"; toolCallId: string; name: string; result: ToolResult }
 
@@ -26,11 +28,11 @@ export interface ToolContext {
   signal?: AbortSignal
   depth?: number
   maxDepth?: number
-  provider?: import("../providers/types").Provider
-  compactProvider?: import("../providers/types").Provider
+  provider?: Provider
+  compactProvider?: Provider
   registry?: Map<string, Tool>
   model?: string
-  store?: import("./state").JSONLStore
+  store?: SessionStore
   sessionId?: string
   maxSteps?: number
   compactThreshold?: number
@@ -51,13 +53,43 @@ export interface Tool {
   execute(input: unknown, ctx: ToolContext): Promise<ToolResult>
 }
 
+export type SessionStatus = "running" | "done" | "aborted" | "error" | "limit"
+
+export interface SessionMeta {
+  id: string
+  cwd: string
+  model: string
+  provider: string
+  createdAt: string
+  parentId?: string
+  forkBoundary?: string
+  title?: string
+}
+
+export interface LoadedSession {
+  meta: SessionMeta
+  status: SessionStatus
+  messages: Message[]
+}
+
+export interface SessionStore {
+  create(meta: SessionMeta, messages?: Message[]): void
+  append(id: string, msg: Message): void
+  setStatus(id: string, status: SessionStatus): void
+  load(id: string): LoadedSession
+  list(): SessionMeta[]
+  listWithTitles(): Array<{ meta: SessionMeta; title: string }>
+}
+
 export type EngineEvent =
   | { type: "tokenDelta"; delta: string }
   | { type: "toolCallStarted"; id: string; name: string; input: unknown }
   | { type: "toolResult"; id: string; name: string; result: ToolResult }
   | { type: "permissionRequest"; id: string; name: string; input: unknown; reason: string }
   | { type: "contextUpdate"; used: number; limit: number; pct: number }
+  | { type: "usage"; usage: Usage; cost?: number }
   | { type: "turnComplete"; step: number }
-  | { type: "runComplete"; steps: number; result: string }
+  | { type: "stepLimit"; steps: number }
+  | { type: "runComplete"; steps: number; result: string; reason?: "complete" | "step_limit" }
   | { type: "error"; message: string }
   | { type: "aborted" }

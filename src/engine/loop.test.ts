@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { MockProvider } from "../providers/mock"
@@ -60,6 +60,25 @@ test("executes tool call then completes", async () => {
   expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 1, result: "ok" })
 })
 
+test("passes plugin chat params and observes permission decisions", async () => {
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "c1", name: "echo", input: { text: "x" } }] },
+    { content: "ok" },
+  ])
+  const seen: { name: string; granted: boolean }[] = []
+  await collect(
+    run([{ role: "user", content: "do it" }], cfg({
+      provider,
+      registry: new Map([["echo", echo]]),
+      autoApprove: true,
+      providerParams: { temperature: 0, top_p: 0.5 },
+      onPermission: (req) => seen.push({ name: req.name, granted: req.granted }),
+    })),
+  )
+  expect(provider.lastOptions?.params).toEqual({ temperature: 0, top_p: 0.5 })
+  expect(seen).toEqual([{ name: "echo", granted: true }])
+})
+
 test("stops at maxSteps", async () => {
   const provider = new MockProvider([
     { toolCalls: [{ id: "c1", name: "echo", input: {} }] },
@@ -75,7 +94,8 @@ test("stops at maxSteps", async () => {
     })),
   )
   expect(evts.filter((e) => e.type === "toolCallStarted")).toHaveLength(2)
-  expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 2, result: "" })
+  expect(evts.at(-2)).toEqual({ type: "stepLimit", steps: 2 })
+  expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 2, result: "", reason: "step_limit" })
 })
 
 test("unknown tool yields error result and continues", async () => {
@@ -121,7 +141,7 @@ test("persists every turn and replays losslessly", async () => {
 })
 
 test("runs reads in parallel, mutators sequentially", async () => {
-  // Updated for opencode optimistic parallel: all Tools in one step run concurrently
+  // Updated for optimistic parallel: all Tools in one step run concurrently
   let active = 0
   let maxActive = 0
   const tracker = (name: string, readonly: boolean): Tool => ({
@@ -219,10 +239,7 @@ test("plan mode blocks write without asking", async () => {
     name: "write",
     result: { ok: false, output: "", error: "permission denied" },
   })
-  expect(provider.lastPrompt[0]).toEqual({
-    role: "user",
-    content: expect.stringContaining("Mode: plan"),
-  })
+  expect(provider.lastSystem).toContain("Mode: plan")
 })
 
 test("grants bash via askPermission callback", async () => {
@@ -234,15 +251,13 @@ test("grants bash via askPermission callback", async () => {
   expect(tr.result.ok).toBe(true)
 })
 
-test("injects structured working-memory at the front of each prompt", async () => {
+test("sends policy through the system channel, not a fake user message", async () => {
   const provider = new MockProvider([{ content: "ok" }])
   await collect(run([{ role: "user", content: "fix the tests" }], cfg({ provider })))
-  const wm = provider.lastPrompt[0]
-  expect(wm).toEqual({
-    role: "user",
-    content: expect.stringContaining("task: fix the tests"),
-  })
-  expect((wm as { content: string }).content).toContain("[working-memory]")
+  expect(provider.lastPrompt).toEqual([{ role: "user", content: "fix the tests" }])
+  expect(provider.lastSystem).toContain("You are Nexus")
+  expect(provider.lastSystem).toContain("Working directory: /tmp")
+  expect(provider.lastSystem).not.toContain("[working-memory]")
 })
 
 test("resume appends without duplicating meta", async () => {
@@ -276,12 +291,17 @@ test("compacts when over threshold then continues", async () => {
   )
   expect(cheap.lastPrompt.length).toBeGreaterThan(0)
   expect(messages[0]).toEqual({ role: "user", content: "x".repeat(200) + "0" })
-  expect(provider.lastPrompt[1]).toEqual({ role: "user", content: "[prior context]\nSUM" })
+  expect(provider.lastPrompt[0]).toEqual({
+    role: "user",
+    content: "[prior context]\nSUM",
+    synthetic: "compaction",
+  })
   const update = evts.find((e) => e.type === "contextUpdate")
   expect(update?.type).toBe("contextUpdate")
   if (update?.type === "contextUpdate") {
     expect(update.limit).toBe(100)
-    expect(update.used).toBeLessThan(budgetUsed(messages))
+    const systemTokens = Math.ceil((provider.lastSystem?.length ?? 0) / 4)
+    expect(update.used).toBeLessThan(budgetUsed(messages) + systemTokens)
   }
   expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 0, result: "done" })
 })
@@ -345,11 +365,16 @@ test("resume after a compacting Turn appends from the Session store", async () =
   // ensure again is present before final ok
   expect(loaded.some((m) => (m as unknown as { content?: string }).content === "again")).toBe(true)
   expect(continued).toEqual(snapshot)
-  expect(provider.lastPrompt[1]).toEqual({ role: "user", content: "[prior context]\nSUM2" })
+  expect(provider.lastPrompt[0]).toEqual({
+    role: "user",
+    content: "[prior context]\nSUM2",
+    synthetic: "compaction",
+  })
   const update = evts.find((e) => e.type === "contextUpdate")
   expect(update?.type).toBe("contextUpdate")
   if (update?.type === "contextUpdate") {
-    expect(update.used).toBeLessThan(budgetUsed(loaded))
+    const systemTokens = Math.ceil((provider.lastSystem?.length ?? 0) / 4)
+    expect(update.used).toBeLessThan(budgetUsed(loaded) + systemTokens)
   }
   expect(readFileSync(store.path("s1"), "utf8")).toContain("[prior context]")
 })
@@ -466,6 +491,31 @@ test("task spawns parallel sub-agents (optimistic)", async () => {
   expect(outputs).toContain("child1 result")
   expect(outputs).toContain("child2 result")
   expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 1, result: "done" })
+})
+
+test("task reports failure when a sub-agent exhausts its step budget", async () => {
+  const { task } = await import("../tools/task")
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "t1", name: "task", input: { prompt: "keep going" } }] },
+    ...Array.from({ length: 15 }, (_, i) => ({
+      toolCalls: [{ id: `e${i}`, name: "echo", input: {} }],
+    })),
+    { content: "parent done" },
+  ])
+  const evts = await collect(
+    run([{ role: "user", content: "go" }], cfg({
+      provider,
+      registry: new Map([["task", task], ["echo", { ...echo, readonly: true }]]),
+      autoApprove: true,
+    })),
+  )
+  const result = evts.find((e) => e.type === "toolResult" && e.name === "task")
+  expect(result?.type).toBe("toolResult")
+  if (result?.type === "toolResult") {
+    expect(result.result.ok).toBe(false)
+    expect(result.result.error).toContain("step limit")
+  }
+  expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 1, result: "parent done" })
 })
 
 test("task respects maxDepth", async () => {
@@ -597,4 +647,78 @@ test("abort propagates to task children", async () => {
     })),
   )
   expect(evts).toEqual([{ type: "aborted" }])
+})
+
+test("emits usage from the provider", async () => {
+  const provider = new MockProvider([{ content: "ok", usage: { inputTokens: 12, outputTokens: 3, cacheReadTokens: 4 } }])
+  const evts = await collect(run([{ role: "user", content: "hi" }], cfg({ provider })))
+  const usage = evts.find((e) => e.type === "usage")
+  expect(usage).toEqual({
+    type: "usage",
+    usage: { inputTokens: 12, outputTokens: 3, cacheReadTokens: 4 },
+    cost: 0,
+  })
+})
+
+test("maxSteps marks the session as limit, never silent success", async () => {
+  const dir = join(tmpdir(), "nexus-limit-" + Math.random().toString(36).slice(2))
+  const store = new JSONLStore(dir)
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "c1", name: "echo", input: {} }] },
+  ])
+  const evts = await collect(
+    run([{ role: "user", content: "go" }], cfg({
+      provider,
+      registry: new Map([["echo", echo]]),
+      store,
+      sessionId: "s1",
+      maxSteps: 1,
+      autoApprove: true,
+    })),
+  )
+  expect(evts.some((e) => e.type === "stepLimit")).toBe(true)
+  expect(store.load("s1").status).toBe("limit")
+  expect(evts.at(-1)).toMatchObject({ type: "runComplete", reason: "step_limit" })
+})
+
+test("loads project instructions into the system channel", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "nexus-loop-instr-"))
+  writeFileSync(join(cwd, "AGENTS.md"), "always run bun test")
+  const provider = new MockProvider([{ content: "ok" }])
+  await collect(run([{ role: "user", content: "hi" }], cfg({ provider, cwd })))
+  expect(provider.lastSystem).toContain("always run bun test")
+})
+
+test("a single long turn never re-appends the active request as a summary", async () => {
+  const dir = join(tmpdir(), "nexus-nocompact-" + Math.random().toString(36).slice(2))
+  const store = new JSONLStore(dir)
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "c1", name: "echo", input: {} }] },
+    { toolCalls: [{ id: "c2", name: "echo", input: {} }] },
+    { content: "done" },
+  ], 10)
+  const cheap = new MockProvider([{ content: "SUM" }])
+  const evts = await collect(
+    run([{ role: "user", content: "one big task" }], cfg({
+      provider,
+      registry: new Map([["echo", echo]]),
+      store,
+      sessionId: "s1",
+      compactProvider: cheap,
+      compactThreshold: 0.01,
+      keepRecent: 2,
+      maxSteps: 5,
+      autoApprove: true,
+    })),
+  )
+  expect(cheap.lastPrompt).toEqual([])
+  expect(store.load("s1").messages.map((m) => m.role)).toEqual([
+    "user",
+    "assistant",
+    "tool",
+    "assistant",
+    "tool",
+    "assistant",
+  ])
+  expect(evts.at(-1)).toMatchObject({ type: "runComplete", result: "done" })
 })

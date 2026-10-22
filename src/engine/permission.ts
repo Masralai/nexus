@@ -9,7 +9,7 @@ export interface PermissionRules {
   denyTools?: string[]
   askTools?: string[]
   denyPatterns?: RegExp[]
-  // Granular opencode-style: tool name -> action or pattern->action map
+  // Granular permission style: tool name -> action or pattern->action map
   // covers read, edit, write, list, glob, grep, bash, external_directory, doom_loop, and wildcard tool patterns like mymcp_*
   read?: PermissionValue
   edit?: PermissionValue
@@ -53,7 +53,7 @@ function resolveGranular(value: PermissionValue | undefined, target: string): Pe
 }
 
 function resolveToolPermission(rules: PermissionRules, tool: string, target: string): PermissionAction | undefined {
-  // edit covers write and apply_patch per opencode: fallback if no direct entry
+  // edit covers write and apply_patch: fallback if no direct entry
   const hasEdit = (rules as Record<string, unknown>)["edit"] !== undefined
   const hasDirect = (rules as Record<string, unknown>)[tool] !== undefined
   if ((tool === "write" || tool === "apply_patch") && hasEdit && !hasDirect) {
@@ -92,11 +92,11 @@ export function decide(rules: PermissionRules, tool: string, reason: string, ctx
     const ext = rules.external_directory as PermissionValue | undefined
     const extResolved = resolveGranular(ext, target)
     if (extResolved) return extResolved
-    // default for external is ask (opencode parity)
+    // default for external is ask (parity default)
     // fall through to ask below if not explicitly allowed
   }
 
-  // opencode default: read *.env denied (but *.env.example allowed)
+  // default: read *.env denied (but *.env.example allowed)
   if (tool === "read" && target) {
     const base = target.split("/").pop() ?? target
     if (base === ".env.example" || base.endsWith(".env.example")) {

@@ -9,7 +9,7 @@ export interface ModePolicy {
   mode: AgentMode
   /** Permission rules applied for this mode (callers may merge extras). */
   rules: PermissionRules
-  /** Extra system guidance appended into working memory. */
+  /** Extra guidance appended to the system channel for this mode. */
   guidance: string
 }
 

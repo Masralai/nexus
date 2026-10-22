@@ -9,7 +9,7 @@ import {
 } from "../cli/config"
 import { setCredential } from "../cli/credentials"
 import { launchRuntime, runTurn } from "../cli/launch"
-import { JSONLStore } from "../engine/state"
+import { openSessionStore } from "../engine/store"
 import type { Message } from "../engine/types"
 import type { AgentMode } from "../engine/mode"
 import { PRESETS, getPreset, otherPreset } from "../providers/presets"
@@ -57,7 +57,7 @@ type Overlay =
 export function Shell() {
   const { exit } = useApp()
   const { stdout } = useStdout()
-  const store = useRef(new JSONLStore()).current
+  const [store] = useState(() => openSessionStore())
   const [sessionId, setSessionId] = useState(String(randomUUID()))
   const [messages, setMessages] = useState<Message[]>([])
   const [created, setCreated] = useState(false)
@@ -463,7 +463,7 @@ export function Shell() {
   useInput((ch, key) => {
     const mouse = parseMouseEvent(ch)
 
-    // Wheel scroll - line-by-line smooth (opencode parity: 3 rows per notch)
+    // Wheel scroll - line-by-line smooth 
     if (mouse?.type === "wheel") {
       if (mouse.button === 4) smoothScroll("up", "wheel")
       else smoothScroll("down", "wheel")

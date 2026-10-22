@@ -60,8 +60,8 @@ export function LiveTurnView({
   }, [run])
 
   useEffect(() => {
-    if (state.done) onDone?.(state.aborted ? 2 : state.error ? 1 : 0)
-  }, [state.done, state.aborted, state.error, onDone])
+    if (state.done) onDone?.(state.stepLimit ? 3 : state.aborted ? 2 : state.error ? 1 : 0)
+  }, [state.done, state.aborted, state.stepLimit, state.error, onDone])
 
   const pct = state.status.limit ? `${(state.status.pct * 100).toFixed(0)}%` : "0%"
   const t = theme()

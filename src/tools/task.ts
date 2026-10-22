@@ -93,6 +93,7 @@ export const task: Tool = {
 
     const outputs: string[] = []
     let finalResult = ""
+    let stepLimited = false
 
     try {
       const childRun = run(childMessages, {
@@ -121,8 +122,11 @@ export const task: Tool = {
         if (ev.type === "toolResult") {
           // Collect tool results for summary
           outputs.push(`[${ev.name}] ${ev.result.output.slice(0, 500)}${ev.result.error ? ` [error] ${ev.result.error}` : ""}`)
+        } else if (ev.type === "stepLimit") {
+          stepLimited = true
         } else if (ev.type === "runComplete") {
           finalResult = ev.result
+          if (ev.reason === "step_limit") stepLimited = true
         } else if (ev.type === "aborted") {
           return { ok: false, output: cap(outputs.join("\n")), error: "aborted" }
         } else if (ev.type === "error") {
@@ -131,6 +135,14 @@ export const task: Tool = {
       }
     } catch (e) {
       return { ok: false, output: cap(outputs.join("\n")), error: e instanceof Error ? e.message : String(e) }
+    }
+
+    if (stepLimited) {
+      return {
+        ok: false,
+        output: cap(outputs.join("\n")),
+        error: `sub-agent hit its step limit (${DEFAULT_CHILD_MAX_STEPS})`,
+      }
     }
 
     // Build summary: prefer finalResult, fallback to tool outputs

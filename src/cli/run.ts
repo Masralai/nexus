@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { JSONLStore } from "../engine/state"
+import type { SessionStore } from "../engine/store"
 import type { Message, Tool } from "../engine/types"
 import type { Provider } from "../providers/types"
 import { runTUI } from "../tui"
@@ -60,7 +60,10 @@ export async function consumeHeadless(
     mode: opts.mode,
   })) {
     if (ev.type === "tokenDelta") write(ev.delta)
-    else if (ev.type === "error") {
+    else if (ev.type === "stepLimit") {
+      write(`\nstep limit reached (${ev.steps} steps); session marked limit\n`)
+      code = 3
+    } else if (ev.type === "error") {
       write(`\nerror: ${ev.message}\n`)
       code = 1
     } else if (ev.type === "aborted") code = 2
@@ -90,7 +93,7 @@ export interface SessionOpts {
   cwd?: string
   model?: string
   yes: boolean
-  store?: JSONLStore
+  store?: SessionStore
   mode?: "plan" | "build"
 }
 

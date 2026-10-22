@@ -35,7 +35,7 @@ function Nav() {
           <div className="flex items-center gap-3">
             
             <span className="font-mono text-[14px] tracking-[-0.02em] font-semibold text-zinc-100">Nexus</span>
-            <span className="hidden sm:inline-flex items-center rounded-full bg-zinc-900 border border-zinc-800 px-2 py-1 font-mono text-[10px] tracking-widest text-zinc-400">MODEL AGNOSTIC</span>
+            
           </div>
           <div className="hidden lg:flex items-center gap-6 font-mono text-[12px] tracking-wide text-zinc-400">
             <a href="#capabilities" className="hover:text-zinc-100 transition-colors">Capabilities</a>
@@ -333,8 +333,7 @@ function OpenSource() {
           <div className="lg:col-span-6">
             <div className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-[#09090b] px-3 py-1.5">
               <span className="size-1.5 rounded-full bg-cyan-400 animate-pulse" />
-              <span className="font-mono text-[11px] tracking-wide text-zinc-400">Open source</span>
-              <span className="font-mono text-[11px] text-zinc-600">MIT</span>
+              
             </div>
             <h2 className="mt-6 font-sans text-3xl md:text-4xl font-semibold tracking-[-0.03em] leading-none text-zinc-100">Built in the open. No platform tax.</h2>
             <p className="mt-4 text-[15px] leading-relaxed text-zinc-400 max-w-[52ch]">Source on GitHub. One binary, no account, no hosted lock in. Skills, sessions, and tools are plain files you can read and fork.</p>
@@ -472,9 +471,7 @@ function InstallSection() {
           <div className="font-mono text-[12px] font-semibold text-zinc-100">Next step after install</div>
           <div className="font-mono text-[12px] text-zinc-500 mt-1">nexus then /key to pick provider, /model to pick model, then type a task.</div>
         </div>
-        <div className="flex items-center gap-2 font-mono text-[11px] text-zinc-500">
-          <span className="inline-flex items-center gap-1.5"><span className="size-1.5 rounded-full bg-cyan-400" /> Works offline after install</span>
-        </div>
+        
       </div>
       <div className="mt-4 flex flex-wrap gap-3 font-mono text-[11px] text-zinc-500">
         <span>Custom repo: NEXUS_INSTALL_REPO=myorg/nexus sh web/install.sh</span>

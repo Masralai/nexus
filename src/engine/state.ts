@@ -1,44 +1,25 @@
 import { appendFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import type { Message } from "./types"
+import type {
+  LoadedSession,
+  Message,
+  SessionMeta,
+  SessionStatus,
+} from "./types"
+import { sessionDisplayTitle } from "./title"
 
-export type SessionStatus = "running" | "done" | "aborted" | "error"
-
-export interface SessionMeta {
-  id: string
-  cwd: string
-  model: string
-  provider: string
-  createdAt: string
-}
+export { sessionDisplayTitle, sessionTitle } from "./title"
 
 type Line =
   | { type: "meta"; session: SessionMeta }
   | { type: "msg"; msg: Message }
   | { type: "status"; status: SessionStatus }
 
-export interface LoadedSession {
-  meta: SessionMeta
-  status: SessionStatus
-  messages: Message[]
-}
-
-export function sessionTitle(messages: Message[]): string {
-  const firstUser = messages.find((m) => m.role === "user" && typeof (m as unknown as { content?: unknown }).content === "string" && ((m as unknown as { content: string }).content.trim().length > 0))
-  const rawCandidate: unknown = (firstUser as unknown as { content?: unknown })?.content ?? (messages[0] as unknown as { content?: unknown })?.content ?? ""
-  if (typeof rawCandidate !== "string") return ""
-  const firstLine = rawCandidate.split("\n")[0]?.trim() ?? ""
-  if (!firstLine) return ""
-  const max = 200
-  return firstLine.length > max ? `${firstLine.slice(0, max)}…` : firstLine
-}
-
-export function sessionDisplayTitle(meta: SessionMeta, messages: Message[]): string {
-  const t = sessionTitle(messages)
-  return t || `${meta.id.slice(0, 8)}…`
-}
-
+/**
+ * Legacy JSONL persistence, used only by the migration importer and its tests.
+ * The product session store is `SQLiteStore`; JSONL is read-only after import.
+ */
 export class JSONLStore {
   constructor(readonly dir: string = join(homedir(), ".nexus", "sessions")) {}
 
@@ -94,14 +75,13 @@ export class JSONLStore {
     }
   }
 
-  listWithTitles(): Array<{ meta: SessionMeta; title: string; messages: Message[] }> {
+  listWithTitles(): Array<{ meta: SessionMeta; title: string }> {
     return this.list()
       .map((meta) => {
         try {
-          const loaded = this.load(meta.id)
-          return { meta, messages: loaded.messages, title: sessionTitle(loaded.messages) || `${meta.id.slice(0, 8)}…` }
+          return { meta, title: sessionDisplayTitle(meta, this.load(meta.id).messages) }
         } catch {
-          return { meta, messages: [], title: `${meta.id.slice(0, 8)}…` }
+          return { meta, title: sessionDisplayTitle(meta) }
         }
       })
       .sort((a, b) => b.meta.createdAt.localeCompare(a.meta.createdAt))
