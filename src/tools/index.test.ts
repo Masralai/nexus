@@ -31,12 +31,19 @@ test("write creates a file", async () => {
   expect(existsSync(join(dir, "b.txt"))).toBe(true)
 })
 
-test("edit replaces first occurrence and errors when missing", async () => {
+test("edit rejects ambiguous matches, supports replaceAll, and errors when missing", async () => {
   const dir = tmp()
   writeFileSync(join(dir, "c.txt"), "foo foo")
   const c = ctx(dir)
-  await edit.execute({ path: "c.txt", oldString: "foo", newString: "bar" }, c)
-  expect((await read.execute({ path: "c.txt" }, c)).output).toBe("bar foo")
+  const ambiguous = await edit.execute({ path: "c.txt", oldString: "foo", newString: "bar" }, c)
+  expect(ambiguous).toEqual({
+    ok: false,
+    output: "",
+    error: "oldString appears 2 times; add more context or set replaceAll: true",
+  })
+  const replaced = await edit.execute({ path: "c.txt", oldString: "foo", newString: "bar", replaceAll: true }, c)
+  expect(replaced.ok).toBe(true)
+  expect((await read.execute({ path: "c.txt" }, c)).output).toBe("bar bar")
   const missing = await edit.execute({ path: "c.txt", oldString: "zzz", newString: "x" }, c)
   expect(missing).toEqual({ ok: false, output: "", error: "oldString not found" })
 })

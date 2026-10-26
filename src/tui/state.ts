@@ -81,6 +81,8 @@ export function reduceEvent(s: TUIState, ev: EngineEvent): TUIState {
       return { ...s, done: true, error: ev.message }
     case "aborted":
       return { ...s, done: true, aborted: true }
+    default:
+      return s
   }
 }
 

@@ -278,7 +278,6 @@ export const glob: Tool = {
       if (files.length > 0 || existsSync(resolve(ctx.cwd, ".git"))) {
         let matches: string[]
         try {
-          // @ts-expect-error Bun.Glob is provided by the Bun runtime types.
           const matcher = new Bun.Glob(pattern)
           matches = files.filter((f) => matcher.match(f))
         } catch {
