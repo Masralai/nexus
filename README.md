@@ -18,7 +18,7 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?style=flat-square&logo=typescript&logoColor=white)
 ![Node](https://img.shields.io/badge/Node-%3E%3D20-3c873a?style=flat-square&logo=node.js&logoColor=white)
 
-*One binary. Any provider. Sessions are files.*
+*One binary. Any provider. Durable sessions in SQLite.*
 
 [Overview](#overview) • [Quick start](#quick-start) • [Installation](#installation) • [Usage](#usage) • [Configuration](#configuration) • [Architecture](#architecture) • [Troubleshooting](#troubleshooting)
 
