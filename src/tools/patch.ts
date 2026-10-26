@@ -1,6 +1,7 @@
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs"
-import { dirname, resolve, join } from "node:path"
-import type { Tool } from "../engine/types"
+import { existsSync, readFileSync, unlinkSync } from "node:fs"
+import { resolve } from "node:path"
+import type { Tool, ToolContext } from "../engine/types"
+import { atomicWrite, checkFresh, forgetPath, snapshotPaths, withFileLock } from "./fsutil"
 
 type PatchOp = { type: "add" | "update" | "move" | "delete"; path: string; content?: string; target?: string }
 
@@ -30,97 +31,103 @@ function parsePatch(text: string): PatchOp[] {
     } else if (line.startsWith("*** Delete File: ")) {
       flush()
       ops.push({ type: "delete", path: line.slice("*** Delete File: ".length).trim() })
-    } else {
-      if (cur) buf.push(line)
+    } else if (line === "*** Begin Patch" || line === "*** End Patch") {
+      continue
+    } else if (cur) {
+      buf.push(line)
     }
   }
   flush()
   return ops
 }
 
-// Simple undo stack per cwd (in-memory)
-const undoStack: Map<string, { path: string; prev: string | null }[]> = new Map()
-
-function pushUndo(cwd: string, entry: { path: string; prev: string | null }) {
-  const stack = undoStack.get(cwd) ?? []
-  stack.push(entry)
-  undoStack.set(cwd, stack)
+async function post(ctx: ToolContext, paths: string[], out: string[]): Promise<string[]> {
+  if (!ctx.afterEdit || paths.length === 0) return out
+  try {
+    out.push(...(await ctx.afterEdit(paths)))
+  } catch {
+    /* reported by the caller's edit tool; patch keeps its primary result */
+  }
+  return out
 }
 
 export const apply_patch: Tool = {
   name: "apply_patch",
-  description: "Apply patches to files. Input: { patchText }. Markers: *** Add File:, *** Update File:, *** Move to:, *** Delete File:",
+  description:
+    "Apply a multi-file patch atomically per file. Input: { patchText }. Markers: *** Add File:, *** Update File:, *** Move to:, *** Delete File:, wrapped by *** Begin Patch / *** End Patch. Snapshots are taken before mutation.",
   schema: {
     type: "object",
     properties: { patchText: { type: "string" } },
     required: ["patchText"],
   },
   readonly: false,
+  outputLimit: 8_000,
   async execute(input, ctx) {
     const { patchText } = input as { patchText: string }
     if (!patchText || typeof patchText !== "string") return { ok: false, output: "", error: "patchText required" }
     const ops = parsePatch(patchText)
     if (ops.length === 0) return { ok: false, output: "", error: "no patch operations found" }
-    const out: string[] = []
+    // Validate all paths and operations before touching a single file.
     for (const op of ops) {
+      if (!op.path && op.type !== "move") return { ok: false, output: "", error: `${op.type} operation has no path` }
+      if ((op.type === "update" || op.type === "delete") && op.path && !existsSync(resolve(ctx.cwd, op.path))) {
+        return { ok: false, output: "", error: `file not found: ${op.path}` }
+      }
+    }
+    const out: string[] = []
+    const changed: string[] = []
+    for (const op of ops) {
+      const full = resolve(ctx.cwd, op.path)
       try {
-        const full = resolve(ctx.cwd, op.path)
-        if (op.type === "add") {
-          mkdirSync(dirname(full), { recursive: true })
-          // save undo
-          let prev: string | null = null
-          try { prev = readFileSync(full, "utf8") } catch { prev = null }
-          pushUndo(ctx.cwd, { path: op.path, prev })
-          writeFileSync(full, op.content ?? "")
-          out.push(`added ${op.path}`)
-        } else if (op.type === "update") {
-          let prev: string | null = null
-          try { prev = readFileSync(full, "utf8") } catch { return { ok: false, output: "", error: `file not found: ${op.path}` } }
-          pushUndo(ctx.cwd, { path: op.path, prev })
-          mkdirSync(dirname(full), { recursive: true })
-          writeFileSync(full, op.content ?? "")
-          out.push(`updated ${op.path}`)
-          if (op.target) {
+        await withFileLock(full, async () => {
+          if (op.type === "add") {
+            if (existsSync(full)) throw new Error(`file already exists: ${op.path}`)
+            snapshotPaths(ctx, `patch add ${op.path}`, [op.path])
+            atomicWrite(full, op.content ?? "")
+            changed.push(op.path)
+            out.push(`added ${op.path}`)
+          } else if (op.type === "update") {
+            const current = readFileSync(full, "utf8")
+            const stale = checkFresh(full, current)
+            if (stale) throw new Error(stale)
+            snapshotPaths(ctx, `patch update ${op.path}`, [op.path, ...(op.target ? [op.target] : [])])
+            atomicWrite(full, op.content ?? "")
+            forgetPath(full)
+            changed.push(op.path)
+            out.push(`updated ${op.path}`)
+            if (op.target) {
+              const targetFull = resolve(ctx.cwd, op.target)
+              atomicWrite(targetFull, op.content ?? "")
+              unlinkSync(full)
+              changed.push(op.target)
+              out.push(`moved ${op.path} -> ${op.target}`)
+            }
+          } else if (op.type === "delete") {
+            snapshotPaths(ctx, `patch delete ${op.path}`, [op.path])
+            unlinkSync(full)
+            forgetPath(full)
+            changed.push(op.path)
+            out.push(`deleted ${op.path}`)
+          } else if (op.type === "move") {
+            if (!op.path || !op.target) throw new Error("move requires source and target")
+            if (!existsSync(full)) throw new Error(`file not found: ${op.path}`)
             const targetFull = resolve(ctx.cwd, op.target)
-            mkdirSync(dirname(targetFull), { recursive: true })
-            // move after update
-            try { writeFileSync(targetFull, readFileSync(full, "utf8")); unlinkSync(full) } catch {}
+            snapshotPaths(ctx, `patch move ${op.path}`, [op.path, op.target])
+            atomicWrite(targetFull, readFileSync(full, "utf8"))
+            unlinkSync(full)
+            changed.push(op.path, op.target)
             out.push(`moved ${op.path} -> ${op.target}`)
           }
-        } else if (op.type === "delete") {
-          let prev: string | null = null
-          try { prev = readFileSync(full, "utf8") } catch { prev = null }
-          pushUndo(ctx.cwd, { path: op.path, prev })
-          try { unlinkSync(full) } catch {}
-          out.push(`deleted ${op.path}`)
-        } else if (op.type === "move") {
-          // pure move without content
-          out.push(`move ${op.path} -> ${op.target}`)
-        }
+        })
       } catch (e) {
         return { ok: false, output: out.join("\n"), error: e instanceof Error ? e.message : String(e) }
       }
     }
-    return { ok: true, output: out.join("\n") }
+    return { ok: true, output: (await post(ctx, changed, out)).join("\n") }
   },
 }
 
-export function undoLast(cwd: string): { ok: boolean; output: string; error?: string } {
-  const stack = undoStack.get(cwd)
-  if (!stack || stack.length === 0) return { ok: false, output: "", error: "nothing to undo" }
-  const last = stack.pop()!
-  const full = resolve(cwd, last.path)
-  try {
-    if (last.prev === null) {
-      try { unlinkSync(full) } catch {}
-      return { ok: true, output: `undid ${last.path} (removed)` }
-    }
-    mkdirSync(dirname(full), { recursive: true })
-    writeFileSync(full, last.prev)
-    return { ok: true, output: `undid ${last.path}` }
-  } catch (e) {
-    return { ok: false, output: "", error: e instanceof Error ? e.message : String(e) }
-  }
+/** Kept for API compatibility. Snapshots are the durable undo mechanism now. */
+export function undoLast(_cwd: string): { ok: boolean; output: string; error?: string } {
+  return { ok: false, output: "", error: "use the undo tool with a Session snapshot store" }
 }
-
-export function redoPlaceholder(): void {}

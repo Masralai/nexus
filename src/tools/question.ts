@@ -1,8 +1,9 @@
-import type { Tool } from "../engine/types"
+import type { QuestionAnswer, QuestionPrompt, Tool } from "../engine/types"
 
 export const question: Tool = {
   name: "question",
-  description: "Ask the user questions. Input: { questions: [{header, question, options: [{label, description}]}] }",
+  description:
+    "Ask the user structured questions through the attached client. Input: { questions: [{header, question, options: [{label, description?}]}] }. In headless mode without a client this fails instead of pretending the user answered.",
   schema: {
     type: "object",
     properties: {
@@ -13,7 +14,14 @@ export const question: Tool = {
           properties: {
             header: { type: "string" },
             question: { type: "string" },
-            options: { type: "array", items: { type: "object", properties: { label: { type: "string" }, description: { type: "string" } }, required: ["label"] } },
+            options: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: { label: { type: "string" }, description: { type: "string" } },
+                required: ["label"],
+              },
+            },
           },
           required: ["header", "question", "options"],
         },
@@ -23,12 +31,21 @@ export const question: Tool = {
   },
   readonly: false,
   async execute(input, ctx) {
-    const { questions } = input as { questions: { header: string; question: string; options: { label: string; description?: string }[] }[] }
-    if (!questions?.length) return { ok: false, output: "", error: "questions required" }
-    // In headless/CLI the Permission gate will surface question via toolResult; in TUI the loop could intercept
-    // For now, record and return the questions as output so the model can see them
-    const out = questions.map((q, i) => `Q${i + 1} [${q.header}]: ${q.question}\nOptions: ${q.options.map((o) => `${o.label}${o.description ? ` — ${o.description}` : ""}`).join(" | ")}`).join("\n\n")
-    // Also emit via console for debugging (not persisted)
-    return { ok: true, output: out }
+    const { questions } = input as { questions: QuestionPrompt[] }
+    if (!Array.isArray(questions) || questions.length === 0) {
+      return { ok: false, output: "", error: "questions required" }
+    }
+    if (!ctx.askQuestion) {
+      return {
+        ok: false,
+        output: "",
+        error: "no interactive client attached; question requires a server or TUI client",
+      }
+    }
+    const answers: QuestionAnswer[] = await ctx.askQuestion(questions, ctx.sessionId ?? "question")
+    return {
+      ok: true,
+      output: answers.map((a) => `[${a.header}] ${a.question}\nAnswer: ${a.answer}`).join("\n\n"),
+    }
   },
 }

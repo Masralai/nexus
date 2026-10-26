@@ -1,28 +1,64 @@
 import { execSync } from "node:child_process"
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
-import { dirname, join, relative, resolve } from "node:path"
-import type { Tool } from "../engine/types"
-import { apply_patch, undoLast } from "./patch"
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs"
+import { basename, dirname, relative, resolve } from "node:path"
+import type { ImagePart, Tool, ToolContext, ToolResult } from "../engine/types"
+import { getModelInfo } from "../providers/catalog"
+import { apply_patch } from "./patch"
 import { todowrite, todoread } from "./todo"
 import { question } from "./question"
 import { lsp } from "./lsp"
 import { task } from "./task"
+import { allFiles, displayPath, isBinaryLike } from "./walk"
+import {
+  atomicWrite,
+  checkFresh,
+  forgetPath,
+  rememberRead,
+  restoreSnapshot,
+  snapshotPaths,
+  withFileLock,
+} from "./fsutil"
 
 const MAX_OUTPUT = 8000
+const MAX_IMAGE_BYTES = 8_000_000
+const IMAGE_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+}
 
-function cap(text: string): string {
-  return text.length <= MAX_OUTPUT ? text : `${text.slice(0, MAX_OUTPUT)}\n[...truncated ${text.length - MAX_OUTPUT} chars]`
+function cap(text: string, max = MAX_OUTPUT): string {
+  return text.length <= max ? text : `${text.slice(0, max)}\n[...truncated ${text.length - max} chars]`
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
+async function appendPostEdit(ctx: ToolContext, paths: string[], result: ToolResult): Promise<ToolResult> {
+  if (!ctx.afterEdit || !result.ok) return result
+  try {
+    const notes = await ctx.afterEdit(paths)
+    if (notes.length) return { ...result, output: `${result.output}\n${notes.join("\n")}` }
+  } catch (e) {
+    return { ...result, output: `${result.output}\n[formatter/diagnostics failed] ${errorText(e)}` }
+  }
+  return result
 }
 
 export const read: Tool = {
   name: "read",
-  description: "Read a file. Input: { path, offset?, limit? } where offset/limit are 0-based line numbers. To read N files, emit N parallel read calls — one path per call, not paths[] or _raw.",
+  description:
+    "Read a file. Input: { path, offset?, limit? } where offset/limit are 0-based line numbers. Image files are returned as image parts for vision models. To read N files, emit N parallel read calls — one path per call, not paths[] or _raw.",
   schema: {
     type: "object",
     properties: { path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } },
     required: ["path"],
   },
   readonly: true,
+  outputLimit: 32_000,
   async execute(input, ctx) {
     const rawInput = input as Record<string, unknown>
     if (rawInput && typeof rawInput === "object" && "_raw" in rawInput) {
@@ -32,79 +68,171 @@ export const read: Tool = {
     if (typeof path !== "string") {
       return { ok: false, output: "", error: "Invalid read input: missing required string field 'path'. Emit one { path } per read call." }
     }
+    const full = resolve(ctx.cwd, path)
     try {
-      const raw = readFileSync(resolve(ctx.cwd, path), "utf8")
+      const st = statSync(full)
+      if (!st.isFile()) return { ok: false, output: "", error: `not a file: ${path}` }
+      const mime = IMAGE_TYPES[full.slice(full.lastIndexOf(".")).toLowerCase()]
+      if (mime) {
+        if (offset !== undefined || limit !== undefined) {
+          return { ok: false, output: "", error: "line windows are not available for images" }
+        }
+        if (st.size > MAX_IMAGE_BYTES) return { ok: false, output: "", error: `image too large (${st.size} bytes; max ${MAX_IMAGE_BYTES})` }
+        const info = getModelInfo(ctx.model ?? "")
+        if (!info.vision) {
+          return {
+            ok: false,
+            output: "",
+            error: `model ${ctx.model ?? "(unknown)"} does not support image input; choose a vision-capable catalog model`,
+          }
+        }
+        const image: ImagePart = { mimeType: mime, data: readFileSync(full).toString("base64"), path }
+        return { ok: true, output: `image ${path} (${mime}, ${st.size} bytes)`, images: [image] }
+      }
+      if (isBinaryLike(full, MAX_IMAGE_BYTES)) {
+        return { ok: false, output: "", error: `binary file: ${path}` }
+      }
+      const raw = readFileSync(full, "utf8")
+      rememberRead(full, raw)
       const lines = raw.replace(/\n$/, "").split("\n")
-      const start = offset ?? 0
-      const slice = lines.slice(start, limit === undefined ? undefined : start + limit)
-      const header = offset === undefined ? "" : `[lines ${start}-${start + slice.length - 1} of ${lines.length}]\n`
-      const out = header + slice.join("\n")
-      return { ok: true, output: cap(out) }
+      const start = Math.max(0, offset ?? 0)
+      const slice = lines.slice(start, limit === undefined ? undefined : start + Math.max(0, limit))
+      const header = offset === undefined ? "" : `[lines ${start}-${Math.max(start, start + slice.length - 1)} of ${lines.length}]\n`
+      return { ok: true, output: cap(header + slice.join("\n")) }
     } catch (e) {
-      return { ok: false, output: "", error: e instanceof Error ? e.message : String(e) }
+      return { ok: false, output: "", error: errorText(e) }
     }
   },
 }
 
 export const write: Tool = {
   name: "write",
-  description: "Create or overwrite a file. Input: { path, content }.",
+  description: "Create or atomically overwrite a file. Input: { path, content }. A snapshot is taken before mutation.",
   schema: {
     type: "object",
     properties: { path: { type: "string" }, content: { type: "string" } },
     required: ["path", "content"],
   },
   readonly: false,
+  outputLimit: 4_000,
   async execute(input, ctx) {
     const { path, content } = input as { path: string; content: string }
+    if (typeof path !== "string" || typeof content !== "string") {
+      return { ok: false, output: "", error: "write requires string fields path and content" }
+    }
     const full = resolve(ctx.cwd, path)
-    mkdirSync(dirname(full), { recursive: true })
-    writeFileSync(full, content)
-    return { ok: true, output: `wrote ${path} (${content.length} bytes)` }
+    return withFileLock(full, async () => {
+      try {
+        let current: string | undefined
+        if (existsSync(full)) current = readFileSync(full, "utf8")
+        if (current !== undefined) {
+          const stale = checkFresh(full, current)
+          if (stale) return { ok: false, output: "", error: stale }
+        }
+        snapshotPaths(ctx, `write ${path}`, [path])
+        atomicWrite(full, content)
+        rememberRead(full, content)
+        return appendPostEdit(ctx, [path], { ok: true, output: `wrote ${path} (${content.length} bytes)` })
+      } catch (e) {
+        return { ok: false, output: "", error: errorText(e) }
+      }
+    })
   },
 }
 
 export const edit: Tool = {
   name: "edit",
-  description: "Replace the first occurrence of oldString with newString in a file. Input: { path, oldString, newString }. Use apply_patch for multi-file or multi-occurrence edits.",
+  description:
+    "Replace text in a file. Input: { path, oldString, newString, replaceAll? }. Fails when oldString is absent, ambiguous (more than one match without replaceAll), or the file changed since it was read. Use apply_patch for multi-file/multi-occurrence refactors.",
   schema: {
     type: "object",
-    properties: { path: { type: "string" }, oldString: { type: "string" }, newString: { type: "string" } },
+    properties: {
+      path: { type: "string" },
+      oldString: { type: "string" },
+      newString: { type: "string" },
+      replaceAll: { type: "boolean" },
+    },
     required: ["path", "oldString", "newString"],
   },
   readonly: false,
+  outputLimit: 4_000,
   async execute(input, ctx) {
-    const { path, oldString, newString } = input as { path: string; oldString: string; newString: string }
-    const full = resolve(ctx.cwd, path)
-    try {
-      const content = readFileSync(full, "utf8")
-      if (!content.includes(oldString)) return { ok: false, output: "", error: "oldString not found" }
-      writeFileSync(full, content.replace(oldString, newString))
-      return { ok: true, output: `edited ${path}` }
-    } catch (e) {
-      return { ok: false, output: "", error: e instanceof Error ? e.message : String(e) }
+    const { path, oldString, newString, replaceAll } = input as {
+      path: string
+      oldString: string
+      newString: string
+      replaceAll?: boolean
     }
+    if (typeof path !== "string" || typeof oldString !== "string" || typeof newString !== "string") {
+      return { ok: false, output: "", error: "edit requires string fields path, oldString, newString" }
+    }
+    if (oldString.length === 0) return { ok: false, output: "", error: "oldString must not be empty" }
+    if (oldString === newString) return { ok: false, output: "", error: "oldString and newString are identical" }
+    const full = resolve(ctx.cwd, path)
+    return withFileLock(full, async () => {
+      try {
+        const content = readFileSync(full, "utf8")
+        const stale = checkFresh(full, content)
+        if (stale) return { ok: false, output: "", error: stale }
+        const count = content.split(oldString).length - 1
+        if (count === 0) return { ok: false, output: "", error: "oldString not found" }
+        if (count > 1 && !replaceAll) {
+          return {
+            ok: false,
+            output: "",
+            error: `oldString appears ${count} times; add more context or set replaceAll: true`,
+          }
+        }
+        snapshotPaths(ctx, `edit ${path}`, [path])
+        const next = replaceAll ? content.split(oldString).join(newString) : content.replace(oldString, newString)
+        atomicWrite(full, next)
+        rememberRead(full, next)
+        return appendPostEdit(ctx, [path], {
+          ok: true,
+          output: `edited ${path} (${replaceAll ? count : 1} replacement${replaceAll && count !== 1 ? "s" : ""})`,
+        })
+      } catch (e) {
+        return { ok: false, output: "", error: errorText(e) }
+      }
+    })
   },
 }
 
 export const bash: Tool = {
   name: "bash",
   description:
-    "Run a shell command in the working directory. Do not use for listing or reading files; use list, glob, read, grep. Input: { command }.",
+    "Run a shell command in a persistent PTY. Working directory and environment survive between calls. Input: { command, timeoutMs? }. Use job_start for long-running processes. Do not use for listing or reading files; use list, glob, read, grep.",
   schema: {
     type: "object",
-    properties: { command: { type: "string" } },
+    properties: { command: { type: "string" }, timeoutMs: { type: "number" } },
     required: ["command"],
   },
   readonly: false,
+  outputLimit: 24_000,
   async execute(input, ctx) {
-    const { command } = input as { command: string }
+    const { command, timeoutMs } = input as { command: string; timeoutMs?: number }
+    if (typeof command !== "string" || !command.trim()) return { ok: false, output: "", error: "command required" }
     try {
-      const stdout = execSync(command, { cwd: ctx.cwd, encoding: "utf8", timeout: 30_000 })
-      return { ok: true, output: cap(stdout) }
+      if (ctx.pty) {
+        const result = await ctx.pty.run(ctx.sessionId ?? ctx.cwd, command, {
+          cwd: ctx.cwd,
+          timeoutMs: timeoutMs ?? 30_000,
+          onOutput: ctx.onOutput,
+        })
+        if (result.exitCode !== 0) {
+          return { ok: false, output: cap(result.output), error: `exit code ${result.exitCode}` }
+        }
+        return { ok: true, output: cap(result.output) }
+      }
+      try {
+        const stdout = execSync(command, { cwd: ctx.cwd, encoding: "utf8", timeout: timeoutMs ?? 30_000 })
+        return { ok: true, output: cap(stdout) }
+      } catch (e) {
+        const err = e as { stdout?: string; stderr?: string; message?: string }
+        return { ok: false, output: cap(`${err.stdout ?? ""}${err.stderr ?? ""}`), error: err.message }
+      }
     } catch (e) {
-      const err = e as { stdout?: string; stderr?: string; message?: string }
-      return { ok: false, output: cap(`${err.stdout ?? ""}${err.stderr ?? ""}`), error: err.message }
+      return { ok: false, output: "", error: errorText(e) }
     }
   },
 }
@@ -115,16 +243,18 @@ export const list: Tool = {
     "List files and directories in a path. Prefer this over bash ls. Input: { path? }. For multiple directories, emit N parallel list calls.",
   schema: { type: "object", properties: { path: { type: "string" } } },
   readonly: true,
+  outputLimit: 16_000,
   async execute(input, ctx) {
     const { path } = (input ?? {}) as { path?: string }
     const dir = resolve(ctx.cwd, path ?? ".")
     try {
       const lines = readdirSync(dir, { withFileTypes: true })
+        .filter((e) => e.name !== ".git")
         .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
         .sort()
       return { ok: true, output: cap(lines.join("\n")) }
     } catch (e) {
-      return { ok: false, output: "", error: e instanceof Error ? e.message : String(e) }
+      return { ok: false, output: "", error: errorText(e) }
     }
   },
 }
@@ -132,22 +262,30 @@ export const list: Tool = {
 export const glob: Tool = {
   name: "glob",
   description:
-    "Find files matching a glob pattern. Input: { pattern }. Respects .gitignore; use ! in .ignore to un-ignore. For multiple patterns, emit N parallel glob calls.",
-  schema: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] },
+    "Find files matching a glob pattern. Input: { pattern, includeHidden? }. Uses git's tracked/untracked file set so .gitignore applies to glob, grep and list consistently. For multiple patterns, emit N parallel glob calls.",
+  schema: {
+    type: "object",
+    properties: { pattern: { type: "string" }, includeHidden: { type: "boolean" } },
+    required: ["pattern"],
+  },
   readonly: true,
+  outputLimit: 8_000,
   async execute(input, ctx) {
-    const { pattern } = input as { pattern: string }
+    const { pattern, includeHidden } = input as { pattern: string; includeHidden?: boolean }
+    if (typeof pattern !== "string" || !pattern) return { ok: false, output: "", error: "pattern required" }
     try {
-      // Prefer portable fast-glob; fallback to Bun.Glob if available
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const anyGlobal = globalThis as any
-      if (anyGlobal.Bun?.Glob) {
+      const files = allFiles(ctx.cwd, { includeHidden })
+      if (files.length > 0 || existsSync(resolve(ctx.cwd, ".git"))) {
+        let matches: string[]
         try {
-          const matches = [...new anyGlobal.Bun.Glob(pattern).scanSync({ cwd: ctx.cwd })]
-          return { ok: true, output: cap(matches.join("\n")) }
+          // @ts-expect-error Bun.Glob is provided by the Bun runtime types.
+          const matcher = new Bun.Glob(pattern)
+          matches = files.filter((f) => matcher.match(f))
         } catch {
-          // fall through to fast-glob
+          const fg = await import("fast-glob")
+          matches = await fg.default(pattern, { cwd: ctx.cwd, dot: false, onlyFiles: true })
         }
+        return { ok: true, output: cap(matches.sort().join("\n")) }
       }
       const fg = await import("fast-glob")
       const entries = await fg.default(pattern, {
@@ -156,111 +294,144 @@ export const glob: Tool = {
         onlyFiles: true,
         ignore: ["**/node_modules/**", "**/.git/**", "**/.next/**", "**/dist/**"],
       })
-      const sorted = (entries as string[]).sort()
-      return { ok: true, output: cap(sorted.join("\n")) }
+      return { ok: true, output: cap((entries as string[]).sort().join("\n")) }
     } catch (e) {
-      return { ok: false, output: "", error: e instanceof Error ? e.message : String(e) }
+      return { ok: false, output: "", error: errorText(e) }
     }
   },
+}
+
+function hasRipgrep(): boolean {
+  try {
+    return Bun.spawnSync(["rg", "--version"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0
+  } catch {
+    return false
+  }
 }
 
 export const grep: Tool = {
   name: "grep",
   description:
-    "Search file contents with a regex. Input: { pattern, path? }. Respects .gitignore; skips node_modules/.git/.next/dist. For multiple searches, emit N parallel grep calls.",
+    "Search file contents with a regex using ripgrep when available. Input: { pattern, path?, glob?, includeHidden? }. Respects .gitignore. For multiple searches, emit N parallel grep calls.",
   schema: {
     type: "object",
-    properties: { pattern: { type: "string" }, path: { type: "string" } },
+    properties: {
+      pattern: { type: "string" },
+      path: { type: "string" },
+      glob: { type: "string" },
+      includeHidden: { type: "boolean" },
+    },
     required: ["pattern"],
   },
   readonly: true,
+  outputLimit: 16_000,
   async execute(input, ctx) {
-    const { pattern, path } = input as { pattern: string; path?: string }
+    const { pattern, path, glob: fileGlob, includeHidden } = input as {
+      pattern: string
+      path?: string
+      glob?: string
+      includeHidden?: boolean
+    }
+    if (typeof pattern !== "string" || !pattern) return { ok: false, output: "", error: "pattern required" }
+    const root = path ? resolve(ctx.cwd, path) : ctx.cwd
+    if (hasRipgrep()) {
+      const args = ["--line-number", "--no-heading", "--color", "never", "--max-columns", "500", "--max-count", "200"]
+      if (includeHidden) args.push("--hidden")
+      if (fileGlob) args.push("--glob", fileGlob)
+      args.push(pattern, root)
+      try {
+        const proc = Bun.spawnSync(["rg", ...args], { cwd: ctx.cwd, stdout: "pipe", stderr: "pipe" })
+        if (proc.exitCode === 0 || proc.exitCode === 1) {
+          const text = proc.stdout.toString().split("\n").filter(Boolean).slice(0, 200).map((line) => {
+            const abs = line.slice(0, line.indexOf(":"))
+            return displayPath(ctx.cwd, abs) + line.slice(abs.length)
+          })
+          return { ok: true, output: cap(text.join("\n")) }
+        }
+        if (proc.exitCode > 1) return { ok: false, output: "", error: proc.stderr.toString() || `rg exit ${proc.exitCode}` }
+      } catch (e) {
+        return { ok: false, output: "", error: errorText(e) }
+      }
+    }
+
     let re: RegExp
     try {
       re = new RegExp(pattern)
     } catch (e) {
-      return { ok: false, output: "", error: e instanceof Error ? e.message : String(e) }
+      return { ok: false, output: "", error: errorText(e) }
     }
-    const root = path ? resolve(ctx.cwd, path) : ctx.cwd
     const hits: string[] = []
     const maxHits = 200
     let truncated = false
-    walk(root, (file) => {
+    const files = path && statSync(root).isFile() ? [relative(ctx.cwd, root)] : allFiles(ctx.cwd, { includeHidden })
+    for (const file of files) {
       if (hits.length >= maxHits + 1) {
         truncated = true
-        return
+        break
       }
-      // ignore binary / huge files quickly
+      const full = resolve(ctx.cwd, file)
+      if (!full.startsWith(root) && !(path && full === root)) continue
+      if (isBinaryLike(full)) continue
       let lines: string[]
       try {
-        const content = readFileSync(file, "utf8")
-        if (content.length > 500_000) return
-        lines = content.split("\n")
+        lines = readFileSync(full, "utf8").split("\n")
       } catch {
-        return
+        continue
       }
       for (let i = 0; i < lines.length; i++) {
-        // avoid RegExp global lastIndex issues
         re.lastIndex = 0
         if (re.test(lines[i])) {
-          hits.push(`${relative(ctx.cwd, file)}:${i + 1}:${lines[i].slice(0, 200)}`)
+          hits.push(`${displayPath(ctx.cwd, full)}:${i + 1}:${lines[i].slice(0, 500)}`)
           if (hits.length > maxHits) {
             truncated = true
             break
           }
         }
       }
-    })
-    const head = hits.slice(0, maxHits)
-    let more = ""
-    if (truncated || hits.length > maxHits) {
-      const extra = hits.length - maxHits
-      more = `\n[...${extra} more matches — results truncated at ${maxHits}, refine pattern or path]`
     }
-    const out = head.join("\n") + more
-    if (head.length === 0) return { ok: true, output: "" }
-    return { ok: true, output: cap(out) }
+    const head = hits.slice(0, maxHits)
+    const more = truncated || hits.length > maxHits ? `\n[...more matches — results truncated at ${maxHits}, refine pattern or path]` : ""
+    return { ok: true, output: cap(head.join("\n") + more) }
   },
 }
 
-function walk(root: string, fn: (file: string) => void): void {
-  let entries: ReturnType<typeof readdirSync>
-  try {
-    entries = readdirSync(root, { withFileTypes: true }) as unknown as ReturnType<typeof readdirSync>
-  } catch {
-    return
-  }
-  for (const entry of entries as unknown as { name: string; isDirectory: () => boolean }[]) {
-    const full = join(root, entry.name)
-    if (entry.isDirectory()) {
-      if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name === ".git" || entry.name === ".next" || entry.name === "dist") continue
-      walk(full, fn)
-    } else {
-      if (entry.name.startsWith(".")) continue
-      fn(full)
-    }
-  }
+export const undo: Tool = {
+  name: "undo",
+  description: "Revert the most recent file snapshot, or a specific snapshot id. Input: { snapshotId? }",
+  schema: { type: "object", properties: { snapshotId: { type: "string" } } },
+  readonly: false,
+  outputLimit: 4_000,
+  async execute(input, ctx) {
+    const { snapshotId } = (input ?? {}) as { snapshotId?: string }
+    return restoreSnapshot(ctx, snapshotId)
+  },
+}
+
+export const snapshots: Tool = {
+  name: "snapshots",
+  description: "List or restore durable file snapshots for this Session. Input: { action: 'list'|'restore', id? }",
+  schema: {
+    type: "object",
+    properties: { action: { type: "string" }, id: { type: "string" } },
+    required: ["action"],
+  },
+  readonly: false,
+  async execute(input, ctx) {
+    const { action, id } = input as { action: string; id?: string }
+    if (action === "restore") return restoreSnapshot(ctx, id)
+    const items = ctx.snapshots?.listSnapshots?.(ctx.sessionId ?? "") ?? []
+    return { ok: true, output: items.map((s) => `${s.id} ${s.createdAt} ${s.label}`).join("\n") || "no snapshots" }
+  },
 }
 
 export { apply_patch } from "./patch"
 export { todowrite, todoread } from "./todo"
 export { question } from "./question"
 export { lsp } from "./lsp"
-
-export const undo: Tool = {
-  name: "undo",
-  description: "Undo last write/edit/apply_patch. Input: {}",
-  schema: { type: "object", properties: {} },
-  readonly: false,
-  async execute(_input, ctx) {
-    const r = undoLast(ctx.cwd)
-    return r.ok ? { ok: true, output: r.output } : { ok: false, output: "", error: r.error }
-  },
-}
+export { task } from "./task"
 
 export function defaultTools(): Tool[] {
-  return [read, write, edit, bash, glob, grep, list, apply_patch, undo, todowrite, todoread, question, lsp, task]
+  return [read, write, edit, bash, glob, grep, list, apply_patch, undo, snapshots, todowrite, todoread, question, lsp, task]
 }
 
 /** @deprecated Prefer tool.readonly / isReadonlyTool — kept for any external imports. */

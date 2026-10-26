@@ -6,7 +6,8 @@ function isEnabled(): boolean {
 
 export const lsp: Tool = {
   name: "lsp",
-  description: "LSP code intelligence. Input: { operation: 'goToDefinition'|'findReferences'|'hover'|'documentSymbol'|'workspaceSymbol'|'goToImplementation', file?: string, line?: number, character?: number, query?: string } . Requires NEXUS_EXPERIMENTAL_LSP_TOOL=true",
+  description:
+    "Language-server code intelligence. Input: { operation: 'goToDefinition'|'findReferences'|'hover'|'documentSymbol'|'workspaceSymbol'|'goToImplementation', file?, line?, character?, query? }. 1-based line/character. Servers are configured under lsp in .nexus.json.",
   schema: {
     type: "object",
     properties: {
@@ -19,14 +20,10 @@ export const lsp: Tool = {
     required: ["operation"],
   },
   readonly: true,
-  async execute(input) {
+  outputLimit: 12_000,
+  async execute(input, ctx) {
     if (!isEnabled()) return { ok: false, output: "", error: "lsp disabled — set NEXUS_EXPERIMENTAL_LSP_TOOL=true" }
-    const { operation } = input as { operation: string }
-    // Stub: real LSP servers would be configured via .nexus.json lsp servers
-    // For now, provide a helpful message directing to grep/read
-    return {
-      ok: true,
-      output: `lsp:${operation} — experimental stub. Use grep/read for navigation. Configure servers in .nexus.json to enable full LSP.`,
-    }
+    if (!ctx.lsp) return { ok: false, output: "", error: "no lsp servers configured" }
+    return ctx.lsp.query(input as { operation: string; file?: string; line?: number; character?: number; query?: string })
   },
 }
