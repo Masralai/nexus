@@ -84,6 +84,35 @@ export const savedPermissions = sqliteTable("saved_permissions", {
   createdAt: text("created_at").notNull(),
 })
 
+export const permissionAudit = sqliteTable(
+  "permission_audit",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id"),
+    tool: text("tool").notNull(),
+    input: text("input").notNull(),
+    action: text("action").notNull(),
+    source: text("source").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [index("permission_audit_session_idx").on(table.sessionId)],
+)
+
+export const jobs = sqliteTable(
+  "jobs",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    command: text("command").notNull(),
+    status: text("status").notNull(),
+    output: text("output").notNull().default(""),
+    exitCode: integer("exit_code"),
+    startedAt: text("started_at").notNull(),
+    endedAt: text("ended_at"),
+  },
+  (table) => [index("jobs_session_idx").on(table.sessionId)],
+)
+
 export const credentials = sqliteTable("credentials", {
   provider: text("provider").primaryKey(),
   secret: text("secret").notNull(),

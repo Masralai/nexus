@@ -122,6 +122,9 @@ export interface PermissionRequest {
   reason: string
 }
 
+/** A client may grant once or remember the grant for the project. */
+export type PermissionReply = boolean | "always"
+
 export interface GateOptions {
   rules: PermissionRules
   id: string

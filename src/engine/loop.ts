@@ -3,7 +3,14 @@ import type { Provider, Usage } from "../providers/types"
 import { estimateCost, getModelInfo } from "../providers/catalog"
 import { approxTextTokens, buildPrompt, budgetPct, budgetUsed, maybeCompact } from "./context"
 import { advertiseTools, modePolicy, isReadonlyTool, type AgentMode } from "./mode"
-import { gateToolCall, reasonForCall, type PermissionRules } from "./permission"
+import {
+  decide,
+  isOutsideCwd,
+  pathForCall,
+  reasonForCall,
+  type PermissionReply,
+  type PermissionRules,
+} from "./permission"
 import { discoverInstructionsWithUrls, type InstructionFile } from "./instructions"
 import { renderSystemPrompt, gitSummary } from "./prompt"
 import type { EngineEvent, Message, SessionStore, Tool, ToolCall, ToolContext, ToolResult } from "./types"
@@ -35,8 +42,24 @@ export interface RunConfig {
   /** Plugin-provided provider request parameters. */
   providerParams?: Record<string, unknown>
   /** Observe each permission decision without changing it. */
-  onPermission?: (req: { name: string; input: unknown; granted: boolean }) => void
-  askPermission?: (req: { id: string; name: string; input: unknown; reason: string }) => Promise<boolean>
+  onPermission?: (req: { name: string; input: unknown; granted: boolean; action?: string; source?: string }) => void
+  askPermission?: (req: { id: string; name: string; input: unknown; reason: string }) => Promise<PermissionReply>
+  /** Persist a grant after the client replied "always". */
+  onPermissionAlways?: (req: { name: string; input: unknown; reason: string }) => Promise<void> | void
+  /** Previously saved project grants, checked before prompting. */
+  savedPermission?: (tool: string, input: unknown) => "allow" | "deny" | undefined
+  /** Ask the attached client structured questions. */
+  askQuestion?: import("./types").ToolContext["askQuestion"]
+  /** Stream partial tool output. */
+  onToolOutput?: (call: { id: string; name: string }, text: string) => void
+  snapshotStore?: import("./types").SnapshotStore
+  jobs?: import("./types").JobControl
+  pty?: import("./types").PtyControl
+  lsp?: import("./types").LspControl
+  mcp?: import("./types").McpControl
+  afterEdit?: (paths: string[]) => Promise<string[]>
+  /** In unattended mode, refuse outside-cwd writes unless explicitly allowed. */
+  workspaceBoundary?: boolean
   depth?: number
   maxDepth?: number
 }
@@ -197,7 +220,14 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
       }
 
       if (stepUsage) {
-        yield { type: "usage", usage: stepUsage, cost: estimateCost(getModelInfo(model), stepUsage) }
+        const cost = estimateCost(getModelInfo(model), stepUsage)
+        const durable = store as SessionStore & { addUsage?: (id: string, usage: Usage, cost: number) => void }
+        try {
+          durable?.addUsage?.(sessionId, stepUsage, cost)
+        } catch {
+          /* accounting must never fail a turn */
+        }
+        yield { type: "usage", usage: stepUsage, cost }
       }
 
       if (cfg.signal?.aborted) {
@@ -238,30 +268,56 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
           if (doomDecision === "ask") {
             const req = { id: call.id, name: call.name, input: call.input, reason: `doom_loop: repeated ${call.name} 3x` }
             yield { type: "permissionRequest", ...req }
-            let granted = false
-            if (cfg.askPermission) granted = await cfg.askPermission(req)
-            else granted = cfg.autoApprove ?? false
+            const reply = cfg.askPermission ? await cfg.askPermission(req) : cfg.autoApprove ?? false
+            const granted = reply === true || reply === "always"
             grants.set(call.id, granted)
             cfg.onPermission?.({ name: call.name, input: call.input, granted })
             continue
           }
         }
-        const askEvents: { id: string; name: string; input: unknown; reason: string }[] = []
-        const granted = await gateToolCall({
-          rules,
-          id: call.id,
+        const reason = reasonForCall(call.name, call.input)
+        const target = pathForCall(call.name, call.input)
+        const outsideCwd = Boolean(target && isOutsideCwd(cwd, target))
+        const req = { id: call.id, name: call.name, input: call.input, reason }
+        const saved = cfg.savedPermission?.(call.name, call.input)
+        let decision = saved ?? decide(rules, call.name, reason, {
+          readonly: isReadonlyTool(tool),
+          outsideCwd,
+          targetPath: target ?? reason,
+        })
+        // Unattended runs still respect a workspace boundary. An explicit
+        // external_directory allow is required to leave cwd.
+        if (outsideCwd && cfg.autoApprove && cfg.workspaceBoundary !== false) {
+          const external = rules.external_directory
+          if (external !== "allow") decision = "deny"
+        }
+
+        let granted = decision === "allow"
+        let source = saved ? "saved" : decision === "allow" ? "rule" : "policy"
+        if (decision === "ask") {
+          // Emit before awaiting the client so an HTTP/SSE client can reply.
+          yield { type: "permissionRequest", ...req }
+          const reply = cfg.askPermission ? await cfg.askPermission(req) : cfg.autoApprove ?? false
+          granted = reply === true || reply === "always"
+          source = reply === "always" ? "remembered" : "user"
+          if (reply === "always") await cfg.onPermissionAlways?.(req)
+        }
+        grants.set(call.id, granted)
+        cfg.onPermission?.({
           name: call.name,
           input: call.input,
-          reason: reasonForCall(call.name, call.input),
-          readonly: isReadonlyTool(tool),
-          cwd,
-          askPermission: cfg.askPermission,
-          autoApprove: cfg.autoApprove,
-          onAsk: (req) => askEvents.push(req),
+          granted,
+          action: granted ? "allow" : "deny",
+          source,
         })
-        for (const req of askEvents) yield { type: "permissionRequest", ...req }
-        grants.set(call.id, granted)
-        cfg.onPermission?.({ name: call.name, input: call.input, granted })
+      }
+
+      for (const call of calls) {
+        if (call.name !== "question" || !grants.get(call.id)) continue
+        const q = call.input as { questions?: import("./types").QuestionPrompt[] }
+        if (typeof q === "object" && Array.isArray(q.questions)) {
+          yield { type: "questionRequest", id: call.id, questions: q.questions }
+        }
       }
 
       const exec = async (call: ToolCall): Promise<ToolResult> => {
@@ -286,10 +342,26 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
           mode,
           skills: cfg.skills,
           askPermission: cfg.askPermission,
+          askQuestion: cfg.askQuestion,
           autoApprove: cfg.autoApprove,
           rules,
+          onOutput: cfg.onToolOutput ? (text) => cfg.onToolOutput!({ id: call.id, name: call.name }, text) : undefined,
+          snapshots: cfg.snapshotStore,
+          jobs: cfg.jobs,
+          pty: cfg.pty,
+          lsp: cfg.lsp,
+          mcp: cfg.mcp,
+          afterEdit: cfg.afterEdit,
         }
-        return tool.execute(call.input, ctx)
+        const result = await tool.execute(call.input, ctx)
+        const limit = tool.outputLimit
+        if (limit && result.output.length > limit) {
+          return {
+            ...result,
+            output: `${result.output.slice(0, limit)}\n[...truncated ${result.output.length - limit} chars]`,
+          }
+        }
+        return result
       }
 
       const results = new Map<string, ToolResult>()
@@ -301,6 +373,15 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
         working.push({ role: "tool", toolCallId: call.id, name: call.name, result: toolResult })
         store?.append(sessionId, working[working.length - 1])
         yield { type: "toolResult", id: call.id, name: call.name, result: toolResult }
+        if (toolResult.images?.length) {
+          const imageMessage = {
+            role: "user" as const,
+            content: `Image returned by ${call.name}${call.input && typeof call.input === "object" && "path" in call.input ? `: ${String((call.input as { path: unknown }).path)}` : ""}`,
+            images: toolResult.images,
+          }
+          working.push(imageMessage)
+          store?.append(sessionId, imageMessage)
+        }
       }
 
       steps++

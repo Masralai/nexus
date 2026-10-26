@@ -137,4 +137,28 @@ ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN cost INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN summary TEXT;
 `,
+  `
+CREATE TABLE IF NOT EXISTS permission_audit (
+  id TEXT PRIMARY KEY,
+  session_id TEXT,
+  tool TEXT NOT NULL,
+  input TEXT NOT NULL,
+  action TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS permission_audit_session_idx ON permission_audit (session_id);
+
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  command TEXT NOT NULL,
+  status TEXT NOT NULL,
+  output TEXT NOT NULL DEFAULT '',
+  exit_code INTEGER,
+  started_at TEXT NOT NULL,
+  ended_at TEXT
+);
+CREATE INDEX IF NOT EXISTS jobs_session_idx ON jobs (session_id);
+`,
 ]

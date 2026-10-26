@@ -1,4 +1,5 @@
 import type { Provider, Usage } from "../providers/types"
+import type { PermissionAction } from "./permission"
 
 export interface ToolCall {
   id: string
@@ -6,14 +7,22 @@ export interface ToolCall {
   input: unknown
 }
 
+export interface ImagePart {
+  mimeType: string
+  /** Base64 payload without a data: prefix. */
+  data: string
+  path?: string
+}
+
 export interface ToolResult {
   ok: boolean
   output: string
   error?: string
+  images?: ImagePart[]
 }
 
 export type Message =
-  | { role: "user"; content: string; synthetic?: "compaction" }
+  | { role: "user"; content: string; synthetic?: "compaction"; images?: ImagePart[] }
   | { role: "assistant"; content: string | null; toolCalls?: ToolCall[] }
   | { role: "tool"; toolCallId: string; name: string; result: ToolResult }
 
@@ -21,6 +30,23 @@ export interface ToolDefinition {
   name: string
   description: string
   schema: unknown
+}
+
+export interface QuestionOption {
+  label: string
+  description?: string
+}
+
+export interface QuestionPrompt {
+  header: string
+  question: string
+  options: QuestionOption[]
+}
+
+export interface QuestionAnswer {
+  header: string
+  question: string
+  answer: string
 }
 
 export interface ToolContext {
@@ -39,9 +65,146 @@ export interface ToolContext {
   keepRecent?: number
   mode?: import("./mode").AgentMode
   skills?: import("../skills").Skill[]
-  askPermission?: (req: { id: string; name: string; input: unknown; reason: string }) => Promise<boolean>
+  askPermission?: (
+    req: { id: string; name: string; input: unknown; reason: string },
+  ) => Promise<import("./permission").PermissionReply>
+  askQuestion?: (questions: QuestionPrompt[], id: string) => Promise<QuestionAnswer[]>
   autoApprove?: boolean
   rules?: import("./permission").PermissionRules
+  /** Stream partial shell/tool output. Best-effort; never awaited. */
+  onOutput?: (chunk: string) => void
+  /** Durable snapshots for mutating tools. */
+  snapshots?: SnapshotStore
+  /** Background job control. */
+  jobs?: JobControl
+  /** Long-lived PTY per session. */
+  pty?: PtyControl
+  /** Real language-server manager, when configured. */
+  lsp?: LspControl
+  /** MCP servers with tools/resources/prompts. */
+  mcp?: McpControl
+  /** Optional post-edit formatter/diagnostics hook. */
+  afterEdit?: (paths: string[]) => Promise<string[]>
+}
+
+export interface StoredEvent {
+  seq: number
+  event: EngineEvent | Record<string, unknown>
+  createdAt: string
+}
+
+export interface SessionCounters {
+  inputTokens: number
+  outputTokens: number
+  reasoningTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  cost: number
+}
+
+export interface InboxItem {
+  id: string
+  sessionId: string
+  data: Record<string, unknown>
+  createdAt: string
+}
+
+export interface DocumentRecord {
+  id: string
+  sessionId?: string
+  kind: string
+  data: unknown
+  createdAt: string
+}
+
+export interface SavedPermissionRecord {
+  id: string
+  projectId?: string
+  tool: string
+  pattern?: string
+  action: PermissionAction
+  createdAt: string
+}
+
+export interface PermissionAuditRecord {
+  id: string
+  sessionId?: string
+  tool: string
+  input: unknown
+  action: PermissionAction
+  source: string
+  createdAt: string
+}
+
+export interface SnapshotStore {
+  saveSnapshot(sessionId: string, label: string, files: SnapshotFile[]): string
+  getSnapshot(sessionId: string, id: string): { id: string; files: SnapshotFile[] } | undefined
+  listSnapshots?(sessionId: string): Array<{ id: string; label: string; createdAt: string }>
+}
+
+export interface SnapshotFile {
+  path: string
+  content: string | null
+}
+
+export interface JobInfo {
+  id: string
+  sessionId: string
+  command: string
+  status: "running" | "done" | "error" | "killed"
+  output: string
+  exitCode?: number
+  startedAt: string
+  endedAt?: string
+}
+
+export interface JobControl {
+  start(sessionId: string, command: string, opts?: { cwd?: string; env?: Record<string, string> }): Promise<JobInfo>
+  get(id: string): JobInfo | undefined
+  list(sessionId?: string): JobInfo[]
+  kill(id: string): boolean
+}
+
+export interface PtyControl {
+  run(sessionId: string, command: string, opts?: { cwd?: string; timeoutMs?: number; onOutput?: (chunk: string) => void }): Promise<{ output: string; exitCode: number }>
+  close(sessionId?: string): void
+}
+
+export interface LspLocation {
+  file: string
+  line: number
+  character: number
+}
+
+export interface LspControl {
+  query(input: {
+    operation: string
+    file?: string
+    line?: number
+    character?: number
+    query?: string
+  }): Promise<{ ok: boolean; output: string; error?: string }>
+  status(): Array<{ name: string; running: boolean; root?: string }>
+}
+
+export interface McpToolInfo {
+  server: string
+  name: string
+  description: string
+  inputSchema: unknown
+}
+
+export interface McpControl {
+  tools(): McpToolInfo[]
+  call(server: string, name: string, input: unknown): Promise<ToolResult>
+  resources(server?: string): Promise<Array<{ server: string; uri: string; name?: string; mimeType?: string }>>
+  readResource(server: string, uri: string): Promise<unknown>
+  prompts(server?: string): Promise<Array<{ server: string; name: string; description?: string }>>
+  getPrompt(server: string, name: string, args?: Record<string, string>): Promise<unknown>
+  status(): Array<{ name: string; connected: boolean; error?: string; transport: string }>
+  connect(name?: string): Promise<void>
+  disconnect(name?: string): Promise<void>
+  close(): Promise<void>
 }
 
 export interface Tool {
@@ -50,6 +213,8 @@ export interface Tool {
   schema: unknown
   /** When true, a Readonly tool: parallel-safe, advertised in plan, auto-allowed by the Permission gate inside cwd. */
   readonly?: boolean
+  /** Tool output budget in characters, enforced before the next provider request. */
+  outputLimit?: number
   execute(input: unknown, ctx: ToolContext): Promise<ToolResult>
 }
 
@@ -86,6 +251,7 @@ export type EngineEvent =
   | { type: "toolCallStarted"; id: string; name: string; input: unknown }
   | { type: "toolResult"; id: string; name: string; result: ToolResult }
   | { type: "permissionRequest"; id: string; name: string; input: unknown; reason: string }
+  | { type: "questionRequest"; id: string; questions: QuestionPrompt[] }
   | { type: "contextUpdate"; used: number; limit: number; pct: number }
   | { type: "usage"; usage: Usage; cost?: number }
   | { type: "turnComplete"; step: number }
