@@ -5,6 +5,51 @@ import { getCredential } from "./credentials"
 import { getPreset, type Preset } from "../providers/presets"
 import type { PermissionRules } from "../engine/permission"
 
+export interface McpServerConfig {
+  type?: "local" | "stdio" | "remote" | "sse" | "http"
+  command?: string | string[]
+  args?: string[]
+  env?: Record<string, string>
+  cwd?: string
+  url?: string
+  headers?: Record<string, string>
+  enabled?: boolean
+}
+
+export interface LspServerConfig {
+  command: string | string[]
+  args?: string[]
+  env?: Record<string, string>
+  root?: string
+  extensions?: string[]
+  languageId?: string
+}
+
+export interface AgentConfig {
+  description?: string
+  mode?: "plan" | "build"
+  model?: string
+  prompt?: string
+  tools?: string[]
+}
+
+export interface CommandConfig {
+  description?: string
+  template: string
+  agent?: string
+  model?: string
+}
+
+export interface CommandHookConfig {
+  command: string | string[]
+  extensions?: string[]
+}
+
+export interface PluginConfig {
+  path: string
+  options?: Record<string, unknown>
+}
+
 export interface NexusConfig {
   provider: string
   preset: string
@@ -16,6 +61,18 @@ export interface NexusConfig {
   permission?: PermissionRules
   /** Extra instruction files or URLs, resolved relative to the project root. */
   instructions?: string[]
+  mcp?: Record<string, McpServerConfig>
+  lsp?: Record<string, LspServerConfig>
+  agents?: Record<string, AgentConfig>
+  commands?: Record<string, CommandConfig | string>
+  formatters?: Record<string, CommandHookConfig>
+  diagnostics?: Record<string, CommandHookConfig>
+  plugins?: Array<string | PluginConfig>
+  titleModel?: string
+  /** Disable automatic LLM title generation (local first-line titles remain). */
+  autoTitle?: boolean
+  /** In unattended runs, refuse paths outside cwd unless explicitly allowed. */
+  workspaceBoundary?: boolean
 }
 
 const DEFAULTS: NexusConfig = {
@@ -25,6 +82,8 @@ const DEFAULTS: NexusConfig = {
   maxSteps: 50,
   compactModel: "",
   compactThreshold: 0.8,
+  autoTitle: true,
+  workspaceBoundary: true,
 }
 
 function num(v: string | undefined): number | undefined {
@@ -77,6 +136,13 @@ export function validateConfig(cfg: NexusConfig, source = "config"): NexusConfig
       fail("instructions must be an array of strings")
     }
   }
+  if (cfg.mcp !== undefined && (typeof cfg.mcp !== "object" || Array.isArray(cfg.mcp))) fail("mcp must be an object")
+  if (cfg.lsp !== undefined && (typeof cfg.lsp !== "object" || Array.isArray(cfg.lsp))) fail("lsp must be an object")
+  if (cfg.agents !== undefined && (typeof cfg.agents !== "object" || Array.isArray(cfg.agents))) fail("agents must be an object")
+  if (cfg.commands !== undefined && (typeof cfg.commands !== "object" || Array.isArray(cfg.commands))) fail("commands must be an object")
+  if (cfg.formatters !== undefined && (typeof cfg.formatters !== "object" || Array.isArray(cfg.formatters))) fail("formatters must be an object")
+  if (cfg.diagnostics !== undefined && (typeof cfg.diagnostics !== "object" || Array.isArray(cfg.diagnostics))) fail("diagnostics must be an object")
+  if (cfg.plugins !== undefined && !Array.isArray(cfg.plugins)) fail("plugins must be an array")
   return cfg
 }
 
@@ -144,6 +210,16 @@ export function loadConfig(opts: { model?: string; file?: string; cwd?: string }
     baseUrl: process.env.NEXUS_BASE_URL ?? (fromPreset ? fromPreset.baseUrl : raw.baseUrl),
     permission: raw.permission,
     instructions: raw.instructions,
+    mcp: raw.mcp,
+    lsp: raw.lsp,
+    agents: raw.agents,
+    commands: raw.commands,
+    formatters: raw.formatters,
+    diagnostics: raw.diagnostics,
+    plugins: raw.plugins,
+    titleModel: raw.titleModel,
+    autoTitle: raw.autoTitle ?? DEFAULTS.autoTitle,
+    workspaceBoundary: raw.workspaceBoundary ?? DEFAULTS.workspaceBoundary,
   }
   return validateConfig(cfg, opts.file ?? "config")
 }
