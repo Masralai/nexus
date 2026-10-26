@@ -69,14 +69,19 @@ test("openai: toChatMessages is lossless for canonical messages", () => {
   ])
 })
 
-test("empty assistant messages are omitted from both protocols", () => {
+test("empty assistant messages are omitted and consecutive user turns merge for anthropic", () => {
   const msgs: Message[] = [
     { role: "user", content: "hi" },
     { role: "assistant", content: null },
     { role: "user", content: "again" },
   ]
   expect(toChatMessages(msgs).map((m) => m.role)).toEqual(["user", "user"])
-  expect(toAnthropicMessages(msgs).map((m) => m.role)).toEqual(["user", "user"])
+  const out = toAnthropicMessages(msgs)
+  expect(out.map((m) => m.role)).toEqual(["user"])
+  expect(out[0].content).toEqual([
+    { type: "text", text: "hi", cache_control: { type: "ephemeral" } },
+    { type: "text", text: "again" },
+  ])
 })
 
 test("anthropic: streams text tokens then done", async () => {
@@ -109,13 +114,25 @@ test("anthropic: aggregates streamed tool_use blocks", async () => {
 test("anthropic: adds cache_control breakpoints to messages[1] and the last message", () => {
   const msgs: Message[] = [
     { role: "user", content: "u0" },
+    { role: "assistant", content: "a0" },
     { role: "user", content: "u1" },
+    { role: "assistant", content: "a1" },
     { role: "user", content: "u2" },
   ]
   const out = toAnthropicMessages(msgs)
-  expect(out[0].content).toBe("u0")
-  expect((out[1].content as { cache_control?: unknown }[])[0].cache_control).toEqual({ type: "ephemeral" })
-  expect((out[2].content as { cache_control?: unknown }[])[0].cache_control).toEqual({ type: "ephemeral" })
+  expect(out).toHaveLength(5)
+  expect(out[0].content).toEqual([{ type: "text", text: "u0" }])
+  expect((out[1].content as { type: string; text: string; cache_control?: unknown }[])[0]).toEqual({
+    type: "text",
+    text: "a0",
+    cache_control: { type: "ephemeral" },
+  })
+  expect((out[4].content as { type: string; text: string; cache_control?: unknown }[])[0]).toEqual({
+    type: "text",
+    text: "u2",
+    cache_control: { type: "ephemeral" },
+  })
+  expect((out[2].content as { cache_control?: unknown }[])[0].cache_control).toBeUndefined()
 })
 
 test("anthropic: always sends max_tokens and the native system channel", async () => {
