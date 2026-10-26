@@ -18,6 +18,7 @@ export interface AnthropicConfig {
 
 type Block =
   | { type: "text"; text: string; cache_control?: { type: "ephemeral" } }
+  | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
   | { type: "tool_use"; id: string; name: string; input: unknown }
   | { type: "tool_result"; tool_use_id: string; content: string; cache_control?: { type: "ephemeral" } }
 
@@ -30,26 +31,47 @@ function mark(m: AnthropicMessage): void {
   if (typeof m.content === "string") {
     m.content = [{ type: "text", text: m.content, cache_control: { type: "ephemeral" } }]
   } else if (m.content.length > 0) {
-    ;(m.content[0] as { cache_control?: { type: "ephemeral" } }).cache_control = { type: "ephemeral" }
+    const first = m.content[0]
+    if (first.type === "text" || first.type === "tool_result") first.cache_control = { type: "ephemeral" }
   }
 }
 
 export function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
   const out: AnthropicMessage[] = []
+  const pushUser = (blocks: Block[]) => {
+    const previous = out[out.length - 1]
+    if (previous?.role === "user" && Array.isArray(previous.content)) {
+      previous.content.push(...blocks)
+      return
+    }
+    out.push({ role: "user", content: blocks })
+  }
   for (const m of messages) {
     if (m.role === "assistant" && m.content === null && !(m.toolCalls?.length)) continue
     if (m.role === "user") {
-      out.push({ role: "user", content: m.content })
+      const blocks: Block[] = []
+      if (m.content) blocks.push({ type: "text", text: m.content })
+      for (const image of m.images ?? []) {
+        blocks.push({
+          type: "image",
+          source: { type: "base64", media_type: image.mimeType, data: image.data },
+        })
+      }
+      if (blocks.length === 0) blocks.push({ type: "text", text: "" })
+      pushUser(blocks)
     } else if (m.role === "assistant") {
       const content: Block[] = []
       if (m.content) content.push({ type: "text", text: m.content })
       for (const tc of m.toolCalls ?? []) content.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input ?? {} })
       out.push({ role: "assistant", content })
     } else {
-      out.push({
-        role: "user",
-        content: [{ type: "tool_result", tool_use_id: m.toolCallId, content: m.result.error ? `${m.result.output}\n[error] ${m.result.error}` : m.result.output }],
-      })
+      pushUser([
+        {
+          type: "tool_result",
+          tool_use_id: m.toolCallId,
+          content: m.result.error ? `${m.result.output}\n[error] ${m.result.error}` : m.result.output,
+        },
+      ])
     }
   }
   if (out.length > 0) mark(out[out.length - 1])

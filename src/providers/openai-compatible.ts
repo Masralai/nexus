@@ -18,9 +18,17 @@ export interface OpenAICompatibleConfig {
   fetchImpl?: typeof fetch
 }
 
+type ChatContent =
+  | string
+  | null
+  | Array<
+      | { type: "text"; text: string }
+      | { type: "image_url"; image_url: { url: string } }
+    >
+
 interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool"
-  content: string | null
+  content: ChatContent
   tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[]
   tool_call_id?: string
 }
@@ -29,7 +37,19 @@ export function toChatMessages(messages: Message[]): ChatMessage[] {
   return messages
     .filter((m) => !(m.role === "assistant" && m.content === null && !(m.toolCalls?.length)))
     .map((m) => {
-      if (m.role === "user") return { role: "user", content: m.content }
+      if (m.role === "user") {
+        if (!m.images?.length) return { role: "user", content: m.content }
+        return {
+          role: "user",
+          content: [
+            ...(m.content ? [{ type: "text" as const, text: m.content }] : []),
+            ...m.images.map((image) => ({
+              type: "image_url" as const,
+              image_url: { url: `data:${image.mimeType};base64,${image.data}` },
+            })),
+          ],
+        }
+      }
       if (m.role === "assistant") {
         return {
           role: "assistant",
