@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import type { Subprocess } from "bun"
 import type { McpControl, McpToolInfo, Tool, ToolResult } from "../engine/types"
 import type { McpServerConfig } from "../cli/config"
 
@@ -19,6 +20,7 @@ interface Client {
   toolList: McpToolInfo[]
   resourceList: Array<{ server: string; uri: string; name?: string; mimeType?: string }>
   promptList: Array<{ server: string; name: string; description?: string }>
+  initialize(): Promise<void>
   request(method: string, params?: unknown): Promise<unknown>
   notify(method: string, params?: unknown): Promise<void>
   close(): Promise<void>
@@ -43,7 +45,7 @@ class StdioClient implements Client {
   toolList: McpToolInfo[] = []
   resourceList: Client["resourceList"] = []
   promptList: Client["promptList"] = []
-  private proc: ReturnType<typeof Bun.spawn>
+  private proc: Subprocess<"pipe", "pipe", "pipe">
   private nextId = 1
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>()
   private buffer = ""

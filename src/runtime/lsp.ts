@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { extname, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
+import type { Subprocess } from "bun"
 import type { LspControl } from "../engine/types"
 import type { LspServerConfig } from "../cli/config"
 
@@ -48,7 +49,7 @@ function commandFor(cfg: LspServerConfig): string[] {
 }
 
 class LspServer {
-  private proc: ReturnType<typeof Bun.spawn>
+  private proc: Subprocess<"pipe", "pipe", "pipe">
   private buffer = Buffer.alloc(0)
   private nextId = 1
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>()
