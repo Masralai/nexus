@@ -60,6 +60,8 @@ export interface ToolContext {
   model?: string
   store?: SessionStore
   sessionId?: string
+  /** Tool call currently executing. Question pairing uses this, not the Session id. */
+  toolCallId?: string
   maxSteps?: number
   compactThreshold?: number
   keepRecent?: number

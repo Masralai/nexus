@@ -722,3 +722,46 @@ test("a single long turn never re-appends the active request as a summary", asyn
   ])
   expect(evts.at(-1)).toMatchObject({ type: "runComplete", result: "done" })
 })
+
+test("question tool waits on the tool-call id, not the session id", async () => {
+  const seen: string[] = []
+  const ask: Tool = {
+    name: "question",
+    description: "ask",
+    schema: { type: "object" },
+    readonly: true,
+    async execute(_input, ctx) {
+      const answers = await ctx.askQuestion!(
+        [{ header: "H", question: "Q", options: [{ label: "A" }] }],
+        ctx.sessionId ?? "session",
+      )
+      return { ok: true, output: answers[0]?.answer ?? "" }
+    },
+  }
+  const evts = await collect(
+    run([{ role: "user", content: "ask" }], cfg({
+      provider: new MockProvider([
+        {
+          toolCalls: [
+            {
+              id: "q1",
+              name: "question",
+              input: { questions: [{ header: "H", question: "Q", options: [{ label: "A" }] }] },
+            },
+          ],
+        },
+        { content: "done" },
+      ]),
+      registry: new Map([["question", ask]]),
+      autoApprove: true,
+      sessionId: "ses_abc",
+      askQuestion: async (_questions, id) => {
+        seen.push(id)
+        return [{ header: "H", question: "Q", answer: "A" }]
+      },
+    })),
+  )
+  expect(seen).toEqual(["q1"])
+  expect(evts.some((e) => e.type === "questionRequest" && e.id === "q1")).toBe(true)
+  expect(evts.some((e) => e.type === "toolResult" && e.id === "q1" && e.result.output === "A")).toBe(true)
+})

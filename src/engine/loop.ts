@@ -336,13 +336,16 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
           model,
           store,
           sessionId,
+          toolCallId: call.id,
           maxSteps,
           compactThreshold: threshold,
           keepRecent,
           mode,
           skills: cfg.skills,
           askPermission: cfg.askPermission,
-          askQuestion: cfg.askQuestion,
+          askQuestion: cfg.askQuestion
+            ? (questions, id) => cfg.askQuestion!(questions, call.id || id)
+            : undefined,
           autoApprove: cfg.autoApprove,
           rules,
           onOutput: cfg.onToolOutput ? (text) => cfg.onToolOutput!({ id: call.id, name: call.name }, text) : undefined,
