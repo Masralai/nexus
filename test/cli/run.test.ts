@@ -37,17 +37,42 @@ test("parseFlags strips --yes and --model", () => {
   expect(parseFlags(["--yes", "fix it", "--model", "gpt"])).toEqual({
     yes: true,
     auto: false,
+    attach: false,
     mode: undefined,
     model: "gpt",
+    format: "text",
     rest: ["fix it"],
   })
-  expect(parseFlags(["--auto", "task", "--plan"])).toEqual({
+  expect(parseFlags(["--auto", "task", "--plan", "--format", "ndjson", "--attach"])).toEqual({
     yes: true,
     auto: true,
+    attach: true,
     mode: "plan",
     model: undefined,
+    format: "ndjson",
     rest: ["task"],
   })
+})
+
+test("headless ndjson emits one event per line", async () => {
+  const dir = join(tmpdir(), "nexus-cli-" + Math.random().toString(36).slice(2))
+  const store = new JSONLStore(dir)
+  const out: string[] = []
+  const code = await consumeHeadless([{ role: "user", content: "hi" }], {
+    runtime: runtime({ provider: new MockProvider([{ content: "hello" }]), store }),
+    cwd: dir,
+    model: "m",
+    maxSteps: 5,
+    sessionId: "h-json",
+    signal: new AbortController().signal,
+    autoApprove: false,
+    format: "ndjson",
+    write: (s) => out.push(s),
+  })
+  expect(code).toBe(0)
+  const events = out.join("").trim().split("\n").map((line) => JSON.parse(line) as { type: string })
+  expect(events.map((e) => e.type)).toContain("runComplete")
+  expect(events.map((e) => e.type)).toContain("tokenDelta")
 })
 
 test("headless exits 0 on complete", async () => {
