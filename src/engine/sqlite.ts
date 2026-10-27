@@ -348,25 +348,65 @@ export class SQLiteStore implements SessionStore {
         .query(
           `INSERT INTO event_sequence (session_id, seq, event, created_at)
            VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM event_sequence WHERE session_id = ?), ?, ?)
-           RETURNING seq`,
+           RETURNING id, seq`,
         )
-        .get(id, id, JSON.stringify(event), now) as { seq: number }
-      return { seq: r.seq, event, createdAt: now }
+        .get(id, id, JSON.stringify(event), now) as { id: number; seq: number }
+      return { cursor: r.id, sessionID: id, seq: r.seq, event, createdAt: now }
     })()
     return row
   }
 
+  /** Replay one Session's events after a per-Session sequence number. */
   eventsAfter(id: string, after = 0, limit = 10_000): StoredEvent[] {
     const rows = this.sqlite
       .query(
-        "SELECT seq, event, created_at FROM event_sequence WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+        "SELECT id, seq, event, created_at FROM event_sequence WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?",
       )
-      .all(id, after, limit) as Array<{ seq: number; event: string; created_at: string }>
+      .all(id, after, limit) as Array<{ id: number; seq: number; event: string; created_at: string }>
     return rows.map((r) => ({
+      cursor: r.id,
+      sessionID: id,
       seq: r.seq,
       event: JSON.parse(r.event) as Record<string, unknown>,
       createdAt: r.created_at,
     }))
+  }
+
+  /** Replay one Session's events after a global cursor. */
+  eventsAfterCursor(id: string, after = 0, limit = 10_000): StoredEvent[] {
+    const rows = this.sqlite
+      .query(
+        "SELECT id, seq, event, created_at FROM event_sequence WHERE session_id = ? AND id > ? ORDER BY id LIMIT ?",
+      )
+      .all(id, after, limit) as Array<{ id: number; seq: number; event: string; created_at: string }>
+    return rows.map((r) => ({
+      cursor: r.id,
+      sessionID: id,
+      seq: r.seq,
+      event: JSON.parse(r.event) as Record<string, unknown>,
+      createdAt: r.created_at,
+    }))
+  }
+
+  /** Replay every Session's events after a global cursor. */
+  listEventsAfter(after = 0, limit = 10_000): StoredEvent[] {
+    const rows = this.sqlite
+      .query("SELECT id, session_id, seq, event, created_at FROM event_sequence WHERE id > ? ORDER BY id LIMIT ?")
+      .all(after, limit) as Array<{ id: number; session_id: string; seq: number; event: string; created_at: string }>
+    return rows.map((r) => ({
+      cursor: r.id,
+      sessionID: r.session_id,
+      seq: r.seq,
+      event: JSON.parse(r.event) as Record<string, unknown>,
+      createdAt: r.created_at,
+    }))
+  }
+
+  lastEventCursor(): number {
+    const row = this.sqlite.query("SELECT COALESCE(MAX(id), 0) AS cursor FROM event_sequence").get() as {
+      cursor: number
+    }
+    return row.cursor
   }
 
   lastEventSeq(id: string): number {

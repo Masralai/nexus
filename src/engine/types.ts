@@ -88,6 +88,10 @@ export interface ToolContext {
 }
 
 export interface StoredEvent {
+  /** Global cursor across every Session; stable and resumable. */
+  cursor: number
+  sessionID: string
+  /** Monotonic sequence within one Session. */
   seq: number
   event: EngineEvent | Record<string, unknown>
   createdAt: string
