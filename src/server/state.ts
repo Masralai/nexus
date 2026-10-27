@@ -90,6 +90,20 @@ export function discoverService(dir = defaultStateDir()): ServiceInfo | undefine
   return undefined
 }
 
+/** Wait until a live registration appears, or throw. */
+export async function waitForService(
+  dir = defaultStateDir(),
+  timeoutMs = 8_000,
+): Promise<ServiceInfo> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const info = discoverService(dir)
+    if (info) return info
+    await Bun.sleep(50)
+  }
+  throw new Error(`timed out waiting for nexus service in ${dir}`)
+}
+
 /** A loopback URL even when the listener binds all interfaces. */
 export function advertisedUrl(hostname: string, port: number): string {
   const host = hostname === "0.0.0.0" || hostname === "::" || hostname === "[::]" ? "127.0.0.1" : hostname

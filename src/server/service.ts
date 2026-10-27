@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { resolve } from "node:path"
 import type { Runtime } from "../cli/launch"
 import { runTurn } from "../cli/launch"
+import type { AgentMode } from "../engine/mode"
 import type { PermissionReply, PermissionRequest } from "../engine/permission"
 import type { SQLiteStore } from "../engine/sqlite"
 import { sessionDisplayTitle } from "../engine/title"
@@ -45,6 +46,8 @@ export interface CreateSessionInput {
 export interface PromptInput {
   text: string
   images?: ImagePart[]
+  autoApprove?: boolean
+  mode?: AgentMode
 }
 
 export interface PromptResult {
@@ -83,6 +86,8 @@ interface PendingQuestion {
   questions: QuestionPrompt[]
   promise: Promise<QuestionAnswer[]>
   resolve: (answers: QuestionAnswer[]) => void
+  /** A tool has attached to this request and is awaiting the reply. */
+  claimed: boolean
 }
 
 type DurableInput = EngineEvent | { type: "messageAdded"; message: Message }
@@ -221,7 +226,7 @@ export class SessionService {
     const controller = new AbortController()
     const turn: ActiveTurn = { controller, promise: Promise.resolve() }
     this.active.set(id, turn)
-    turn.promise = this.execute(id, controller).finally(() => {
+    turn.promise = this.execute(id, controller, input).finally(() => {
       if (this.active.get(id) === turn) this.active.delete(id)
     })
     return { sessionID: id, message }
@@ -299,7 +304,7 @@ export class SessionService {
     }
   }
 
-  private async execute(id: string, controller: AbortController): Promise<void> {
+  private async execute(id: string, controller: AbortController, input: PromptInput): Promise<void> {
     const loaded = this.store.load(id)
     const runtime = this.runtime(loaded.meta.cwd, loaded.meta.model)
     try {
@@ -311,6 +316,8 @@ export class SessionService {
         runtime,
         resume: true,
         signal: controller.signal,
+        autoApprove: input.autoApprove,
+        mode: input.mode,
         askPermission: (request) => this.askPermission(id, request),
         askQuestion: (questions, requestID) => this.askQuestion(id, questions, requestID),
       })
@@ -363,10 +370,15 @@ export class SessionService {
     requestID: string,
   ): Promise<QuestionAnswer[]> {
     const list = this.questions.get(sessionID) ?? []
-    const existing = list.find((item) => item.id === requestID)
-    if (existing) return existing.promise
+    const existing =
+      list.find((item) => item.id === requestID) ?? list.find((item) => !item.claimed)
+    if (existing) {
+      existing.claimed = true
+      return existing.promise
+    }
     // Direct tool use without a preceding event: create an addressable request.
     const waiter = this.newQuestion(sessionID, requestID, questions)
+    waiter.claimed = true
     list.push(waiter)
     this.questions.set(sessionID, list)
     return waiter.promise
@@ -384,7 +396,7 @@ export class SessionService {
 
   private newQuestion(sessionID: string, id: string, questions: QuestionPrompt[]): PendingQuestion {
     const { promise, resolve } = deferred<QuestionAnswer[]>()
-    return { sessionID, id, questions, promise, resolve }
+    return { sessionID, id, questions, promise, resolve, claimed: false }
   }
 
   private rejectPending(sessionID: string): void {

@@ -316,9 +316,14 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
       const text = stringField(input, "text")
       const images = input.images
       if (images !== undefined && !Array.isArray(images)) throw badRequest("images must be an array")
+      const autoApprove = input.autoApprove === true || input.yes === true
+      const modeRaw = stringField(input, "mode", false)
+      const mode = modeRaw ? parseMode(modeRaw) : undefined
       const result = service.prompt(params.sessionID, {
         text: text!,
         ...(images ? { images: images as ImagePart[] } : {}),
+        ...(autoApprove ? { autoApprove: true } : {}),
+        ...(mode ? { mode } : {}),
       })
       return data(result.message)
     },

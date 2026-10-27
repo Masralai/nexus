@@ -42,7 +42,10 @@ export const question: Tool = {
         error: "no interactive client attached; question requires a server or TUI client",
       }
     }
-    const answers: QuestionAnswer[] = await ctx.askQuestion(questions, ctx.sessionId ?? "question")
+    const answers: QuestionAnswer[] = await ctx.askQuestion(
+      questions,
+      ctx.toolCallId ?? ctx.sessionId ?? "question",
+    )
     return {
       ok: true,
       output: answers.map((a) => `[${a.header}] ${a.question}\nAnswer: ${a.answer}`).join("\n\n"),

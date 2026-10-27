@@ -1,10 +1,17 @@
+import { randomUUID } from "node:crypto"
 import { resolve } from "node:path"
 import { launchRuntime } from "../cli/launch"
 import type { NexusConfig } from "../cli/config"
 import { openSessionStore, type SQLiteStore } from "../engine/store"
 import { createRouter } from "./router"
 import { SessionService, type RuntimeFactory } from "./service"
-import { advertisedUrl, generateToken } from "./state"
+import {
+  advertisedUrl,
+  generateToken,
+  removeServiceInfo,
+  writeServiceInfo,
+  type ServiceInfo,
+} from "./state"
 
 export interface StartServerOptions {
   store?: SQLiteStore
@@ -16,6 +23,9 @@ export interface StartServerOptions {
   runtimeFactory?: RuntimeFactory
   config?: NexusConfig
   version?: string
+  /** Write `service.json` so clients can discover this process. */
+  register?: boolean
+  stateDir?: string
 }
 
 export interface ServerHandle {
@@ -68,10 +78,24 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
     server.port ?? options.port ?? 4096,
   )
 
+  let registration: ServiceInfo | undefined
+  if (options.register) {
+    registration = {
+      id: randomUUID(),
+      version,
+      url,
+      pid: process.pid,
+      password: token,
+      startedAt,
+    }
+    writeServiceInfo(registration, options.stateDir)
+  }
+
   let stopped = false
   const stop = async (): Promise<void> => {
     if (stopped) return
     stopped = true
+    if (registration) removeServiceInfo(registration, options.stateDir)
     await service.shutdown()
     server.stop(true)
     if (ownsStore) store.close()
