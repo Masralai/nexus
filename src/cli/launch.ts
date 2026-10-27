@@ -66,6 +66,7 @@ export interface TurnOpts {
   autoApprove?: boolean
   signal?: AbortSignal
   askPermission?: RunConfig["askPermission"]
+  askQuestion?: RunConfig["askQuestion"]
   runtime?: Runtime
   model?: string
   maxSteps?: number
@@ -97,6 +98,7 @@ export async function* runTurn(opts: TurnOpts): AsyncIterable<EngineEvent> {
     providerParams,
     onPermission: rt.plugins ? (req) => rt.plugins!.permission(req, pluginCtx) : undefined,
     askPermission: opts.askPermission,
+    askQuestion: opts.askQuestion,
     rules: rt.cfg.permission,
     instructionPaths: rt.cfg.instructions,
   })

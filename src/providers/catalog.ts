@@ -67,6 +67,11 @@ export function getModelInfo(model: string): ModelInfo {
   return best ?? FALLBACK
 }
 
+/** Pinned catalog snapshot for clients and the `/api/model` route. */
+export function listModels(): ModelInfo[] {
+  return ENTRIES.map((entry) => ({ ...entry, cost: { ...entry.cost } }))
+}
+
 /**
  * Estimate cost in USD. `inputTokens` is total prompt tokens including cache
  * reads/writes (providers normalize to that). Cache reads bill at 10% of input,
