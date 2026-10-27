@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { resolve } from "node:path"
 import type { Runtime } from "../cli/launch"
 import { runTurn } from "../cli/launch"
-import type { PermissionReply } from "../engine/permission"
+import type { PermissionReply, PermissionRequest } from "../engine/permission"
 import type { SQLiteStore } from "../engine/sqlite"
 import { sessionDisplayTitle } from "../engine/title"
 import type {
@@ -19,6 +19,9 @@ import { badRequest, conflict, notFound } from "./errors"
 
 export interface WireEvent {
   id: string
+  /** Global resumable cursor. SSE clients echo this as the last event id. */
+  cursor: number
+  /** Per-Session sequence number. */
   seq: number
   sessionID: string
   created: string
@@ -67,6 +70,9 @@ interface ActiveTurn {
 interface PendingPermission {
   sessionID: string
   id: string
+  name: string
+  input: unknown
+  reason: string
   promise: Promise<PermissionReply>
   resolve: (reply: PermissionReply) => void
 }
@@ -100,6 +106,7 @@ export function wireEvent(sessionID: string, stored: StoredEvent): WireEvent {
   delete data.type
   return {
     id: `evt_${sessionID}_${stored.seq}`,
+    cursor: stored.cursor,
     seq: stored.seq,
     sessionID,
     created: stored.createdAt,
@@ -157,11 +164,13 @@ export class SessionService {
   }
 
   get(id: string): SessionView {
+    if (!this.store.has(id)) throw notFound(`session ${id} not found`)
     const loaded = this.store.load(id)
     return this.view(loaded.meta, sessionDisplayTitle(loaded.meta, loaded.messages))
   }
 
   messages(id: string, limit?: number): Message[] {
+    if (!this.store.has(id)) throw notFound(`session ${id} not found`)
     const messages = this.store.load(id).messages
     return limit && limit > 0 ? messages.slice(-limit) : messages
   }
@@ -227,6 +236,16 @@ export class SessionService {
     return true
   }
 
+  pendingPermissions(sessionID: string): PermissionRequest[] {
+    return [...this.permissions.values()]
+      .filter((pending) => pending.sessionID === sessionID)
+      .map(({ id, name, input, reason }) => ({ id, name, input, reason }))
+  }
+
+  pendingQuestions(sessionID: string): Array<{ id: string; questions: QuestionPrompt[] }> {
+    return (this.questions.get(sessionID) ?? []).map(({ id, questions }) => ({ id, questions }))
+  }
+
   replyPermission(sessionID: string, requestID: string, reply: PermissionReply): void {
     const key = `${sessionID}\0${requestID}`
     const pending = this.permissions.get(key)
@@ -237,7 +256,7 @@ export class SessionService {
 
   replyQuestion(sessionID: string, requestID: string, answers: QuestionAnswer[]): void {
     const pending = this.questions.get(sessionID) ?? []
-    const index = requestID === "latest" ? 0 : pending.findIndex((item) => item.id === requestID)
+    const index = requestID === "latest" ? pending.length - 1 : pending.findIndex((item) => item.id === requestID)
     if (index < 0 || !pending[index]) throw notFound(`question request ${requestID} not found`)
     const [item] = pending.splice(index, 1)
     if (pending.length === 0) this.questions.delete(sessionID)
@@ -249,8 +268,18 @@ export class SessionService {
     return () => this.listeners.delete(listener)
   }
 
-  eventsAfter(sessionID: string, after: number): WireEvent[] {
-    return this.store.eventsAfter(sessionID, after).map((stored) => wireEvent(sessionID, stored))
+  /** Replay one Session from a global cursor. */
+  eventsAfter(sessionID: string, after = 0): WireEvent[] {
+    return this.store.eventsAfterCursor(sessionID, after).map((stored) => wireEvent(sessionID, stored))
+  }
+
+  /** Replay every Session from a global cursor. */
+  allEventsAfter(after = 0): WireEvent[] {
+    return this.store.listEventsAfter(after).map((stored) => wireEvent(stored.sessionID, stored))
+  }
+
+  lastCursor(): number {
+    return this.store.lastEventCursor()
   }
 
   async shutdown(): Promise<void> {
@@ -317,7 +346,15 @@ export class SessionService {
     const key = `${sessionID}\0${request.id}`
     if (this.permissions.has(key)) return
     const { promise, resolve } = deferred<PermissionReply>()
-    this.permissions.set(key, { sessionID, id: request.id, promise, resolve })
+    this.permissions.set(key, {
+      sessionID,
+      id: request.id,
+      name: request.name,
+      input: request.input,
+      reason: request.reason,
+      promise,
+      resolve,
+    })
   }
 
   private askQuestion(
@@ -325,14 +362,11 @@ export class SessionService {
     questions: QuestionPrompt[],
     requestID: string,
   ): Promise<QuestionAnswer[]> {
-    const pending = this.questions.get(sessionID) ?? []
-    const next = pending.shift()
-    if (pending.length === 0) this.questions.delete(sessionID)
-    else this.questions.set(sessionID, pending)
-    if (next) return next.promise
+    const list = this.questions.get(sessionID) ?? []
+    const existing = list.find((item) => item.id === requestID)
+    if (existing) return existing.promise
     // Direct tool use without a preceding event: create an addressable request.
     const waiter = this.newQuestion(sessionID, requestID, questions)
-    const list = this.questions.get(sessionID) ?? []
     list.push(waiter)
     this.questions.set(sessionID, list)
     return waiter.promise
@@ -343,6 +377,7 @@ export class SessionService {
     request: { id: string; questions: QuestionPrompt[] },
   ): void {
     const list = this.questions.get(sessionID) ?? []
+    if (list.some((item) => item.id === request.id)) return
     list.push(this.newQuestion(sessionID, request.id, request.questions))
     this.questions.set(sessionID, list)
   }

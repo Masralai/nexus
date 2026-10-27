@@ -4,7 +4,7 @@ const HEARTBEAT_MS = 15_000
 
 export function sseFrame(event: WireEvent, includeID = true): string {
   const lines = [`event: ${event.type}`, `data: ${JSON.stringify(event)}`]
-  if (includeID) lines.unshift(`id: ${event.seq}`)
+  if (includeID) lines.unshift(`id: ${event.cursor}`)
   return `${lines.join("\n")}\n\n`
 }
 
