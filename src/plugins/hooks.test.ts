@@ -66,3 +66,13 @@ test("chatParams compose in registration order", () => {
     top_p: 0.5,
   })
 })
+
+test("a broken tool hook is isolated without dropping the tool", () => {
+  const registry = new PluginRegistry()
+    .use({ name: "broken-register", registerTools: () => { throw new Error("boom") } })
+    .use({ name: "broken-wrap", tool: () => { throw new Error("boom") } })
+    .use({ name: "broken-params", chatParams: () => { throw new Error("boom") } })
+  const out = registry.tools([tool("read")], { cwd: "/tmp" })
+  expect(out.map((item) => item.name)).toEqual(["read"])
+  expect(registry.chatParams({ model: "m" }, { cwd: "/tmp" })).toEqual({ model: "m" })
+})

@@ -40,12 +40,24 @@ export class PluginRegistry {
   tools(tools: readonly Tool[], ctx: PluginContext): Tool[] {
     let out = [...tools]
     for (const plugin of this.plugins) {
-      if (plugin.registerTools) out.push(...plugin.registerTools(ctx))
+      if (!plugin.registerTools) continue
+      try {
+        out.push(...plugin.registerTools(ctx))
+      } catch {
+        /* one plugin must not remove the whole tool set */
+      }
     }
     for (const plugin of this.plugins) {
       if (!plugin.tool) continue
       out = out
-        .map((tool) => plugin.tool!(tool, ctx))
+        .map((tool) => {
+          try {
+            return plugin.tool!(tool, ctx)
+          } catch {
+            // Keep the unwrapped tool when a wrapper fails.
+            return tool
+          }
+        })
         .filter((tool): tool is Tool => tool !== undefined)
     }
     return out
@@ -55,8 +67,12 @@ export class PluginRegistry {
   auth(provider: string): { apiKey?: string } | undefined {
     let out: { apiKey?: string } | undefined
     for (const plugin of this.plugins) {
-      const next = plugin.auth?.(provider)
-      if (next) out = next
+      try {
+        const next = plugin.auth?.(provider)
+        if (next) out = next
+      } catch {
+        /* ignore an auth hook that throws */
+      }
     }
     return out
   }
@@ -65,8 +81,12 @@ export class PluginRegistry {
     let out = { ...params }
     for (const plugin of this.plugins) {
       if (!plugin.chatParams) continue
-      const next = plugin.chatParams(out, ctx)
-      if (next) out = next
+      try {
+        const next = plugin.chatParams(out, ctx)
+        if (next) out = next
+      } catch {
+        /* ignore a broken parameter hook */
+      }
     }
     return out
   }
