@@ -40,10 +40,11 @@ Use it as an interactive shell for day-to-day coding or as a headless one-shot r
 - **Model-agnostic** — Anthropic, OpenAI, Gemini, OpenRouter, Groq, DeepSeek, xAI, Mistral, Cohere, Ollama via one config (`src/providers/presets.ts`)
 - **Two agent modes** — `plan` (read-only, auto-allowed) and `build` (full tools with approval)
 - **Permission gate** — readonly tools inside the session cwd are auto-allowed; `write`/`edit`/`bash` and paths outside cwd always ask (`src/engine/permission.ts:17`)
-- **Six focused tools** — `read`, `write`, `edit`, `bash`, `list`, `glob`, `grep` (`src/tools/index.ts:160`)
+- **Six focused tools** — `read`, `write`, `edit`, `bash`, `list`, `glob`, `grep`, plus patch, snapshots, jobs, LSP, sub-agents, and git worktrees (`src/tools/index.ts`)
 - **Durable sessions** — SQLite at `~/.nexus/nexus.db` with typed parts and a one-time legacy JSONL import (`src/engine/sqlite.ts`, `nexus migrate`)
 - **Real prompt architecture** — policy and environment in the provider system channel, layered `AGENTS.md` discovery, per-tool truncation, and pairing-safe compaction (`src/engine/prompt.ts`, `src/engine/instructions.ts`, `src/engine/compact.ts`)
 - **Skills** — reusable instruction packs from `.agents/skills` injected into context (`src/skills/index.ts:87`)
+- **Commands, agents, and plugins** — config-defined slash commands, custom agent prompts/tool sets, and isolated local plugin modules (`src/cli/commands.ts`, `src/plugins/load.ts`)
 - **Ink TUI** — live turn view, stream viewport, mouse wheel scroll, permission picker (`src/tui/shell.tsx:44`)
 
 ## Prerequisites
@@ -136,6 +137,7 @@ Slash commands (`src/tui/slash.ts:7`):
 | `/model` | Set model (preset suggestions + custom) |
 | `/skill [name\|clear]` | Activate a skill; bare `/skill` opens searchable picker |
 | `/skills` | Alias for `/skill` |
+| `/agent [name]` | Select a config-defined custom agent |
 | `/{skill-id}` | Activate a skill directly by id (e.g. `/tdd`) |
 | `/plan` | Switch to read-only plan mode |
 | `/build` | Switch to build mode (full tools) |
@@ -197,7 +199,20 @@ Sessions live in SQLite at `~/.nexus/nexus.db` (override with `NEXUS_DB`). Each 
   "maxSteps": 50,
   "compactModel": "gpt-4o-mini",
   "compactThreshold": 0.8,
-  "baseUrl": "https://api.openai.com/v1"
+  "baseUrl": "https://api.openai.com/v1",
+  "commands": {
+    "review": "Review $ARGUMENTS for bugs and missing tests",
+    "release": { "template": "Prepare release $1", "description": "release checklist", "agent": "release" }
+  },
+  "agents": {
+    "release": {
+      "description": "Conservative release engineer",
+      "mode": "plan",
+      "tools": ["read", "grep", "glob", "task"],
+      "prompt": "Never mutate files without explicit approval."
+    }
+  },
+  "plugins": ["./plugins/example.ts"]
 }
 ```
 
@@ -278,8 +293,13 @@ Key seams:
 | `grep` | yes | `{ pattern, path? }` | Regex search (skips dotfiles/`node_modules`) |
 | `write` | no | `{ path, content }` | Create/overwrite a file |
 | `edit` | no | `{ path, oldString, newString }` | Exact-string replacement |
-| `bash` | no | `{ command }` | Run a shell command (30s timeout) |
+| `apply_patch` | no | `{ patch }` | Multi-file / multi-occurrence patch |
+| `bash` | no | `{ command }` | Run a shell command through the persistent PTY |
 | `task` | yes | `{ prompt, subagent_type?: "explore"\|"plan" }` | Spawn parallel sub-agent(s) for research — emit N `task` in one step |
+| `job_start` / `job_status` / `job_list` / `job_kill` | mixed | `{ command }`, `{ id }` | Background jobs with output retained across steps |
+| `inbox` | yes | `{}` | Read completed background results for the Session |
+| `lsp` | yes | `{ operation, file?, line?, character?, query? }` | Language-server navigation and symbols |
+| `worktree_create` / `worktree_list` / `worktree_remove` | mixed | `{ name?, branch?, from?, directory? }`, `{ directory, force? }` | Isolated git worktrees on their own branches |
 
 > [!WARNING]
 > `bash` always asks for approval and should not be used for listing or reading files — use `list`/`glob`/`read`/`grep` instead.
@@ -314,7 +334,10 @@ nexus/
 │   ├── cli/          # main.ts, launch.ts (turn launcher), config.ts, credentials.ts, run.ts
 │   ├── engine/       # loop.ts, sqlite.ts, schema.ts, migrations.ts, prompt.ts, instructions.ts, context.ts, compact.ts, permission.ts, mode.ts, types.ts
 │   ├── providers/    # index.ts, presets.ts, anthropic.ts, openai-compatible.ts, mock.ts, sse.ts
-│   ├── tools/        # index.ts (read/write/edit/bash/list/glob/grep)
+│   ├── tools/        # index.ts (read/write/edit/bash/list/glob/grep), worktree.ts, jobs.ts, patch.ts, lsp.ts, task.ts
+│   ├── runtime/      # pty.ts, mcp.ts, lsp.ts, jobs.ts, worktree.ts, hooks.ts
+│   ├── plugins/      # hooks.ts (stable seam), load.ts (local modules)
+│   ├── server/       # HTTP API, SSE feed, auth, service state
 │   ├── skills/       # index.ts (discover/format/filter)
 │   └── tui/          # shell.tsx, live-turn.tsx, stream.tsx, permission-gate.tsx, picker.tsx, ...
 ├── fixtures/providers/  # recorded provider fixtures
