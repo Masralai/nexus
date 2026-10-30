@@ -159,6 +159,7 @@ export function pathForCall(name: string, input: unknown): string | undefined {
   if (name === "bash" || !input || typeof input !== "object") return undefined
   const obj = input as Record<string, unknown>
   if (typeof obj.path === "string") return obj.path
+  if ((name === "worktree_create" || name === "worktree_remove") && typeof obj.directory === "string") return obj.directory
   if (name === "glob" && typeof obj.pattern === "string" && looksLikePath(obj.pattern)) return obj.pattern
   return undefined
 }

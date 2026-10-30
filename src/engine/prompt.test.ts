@@ -55,3 +55,14 @@ test("skill bodies are included with provenance", () => {
   expect(out).toContain("## Skill: tdd")
   expect(out).toContain("Write the failing test first.")
 })
+
+test("custom agent instructions appear before tool guidance", () => {
+  const out = renderSystemPrompt({
+    mode: "build",
+    environment: env,
+    tools: [{ name: "read" }],
+    agentPrompt: "You are the release agent. Never tag without approval.",
+  })
+  expect(out).toContain("Agent instructions:\nYou are the release agent.")
+  expect(out.indexOf("Agent instructions:")).toBeLessThan(out.indexOf("Tool guidance:"))
+})

@@ -642,6 +642,31 @@ export class SQLiteStore implements SessionStore {
     return rows.map((r) => ({ id: r.id, worktree: r.worktree, vcs: r.vcs ?? undefined, updatedAt: r.updated_at }))
   }
 
+  recordWorktree(directory: string, strategy?: string): void {
+    this.sqlite
+      .query(
+        "INSERT INTO worktrees (directory, strategy, created_at) VALUES (?, ?, ?) ON CONFLICT(directory) DO UPDATE SET strategy = excluded.strategy",
+      )
+      .run(directory, strategy ?? null, new Date().toISOString())
+  }
+
+  listWorktrees(): Array<{ directory: string; strategy?: string; createdAt: string }> {
+    const rows = this.sqlite.query("SELECT * FROM worktrees ORDER BY created_at DESC").all() as Array<{
+      directory: string
+      strategy: string | null
+      created_at: string
+    }>
+    return rows.map((r) => ({
+      directory: r.directory,
+      ...(r.strategy ? { strategy: r.strategy } : {}),
+      createdAt: r.created_at,
+    }))
+  }
+
+  forgetWorktree(directory: string): void {
+    this.sqlite.query("DELETE FROM worktrees WHERE directory = ?").run(directory)
+  }
+
   /** Remove the given message and everything after it. Returns removed part count. */
   revertTo(sessionId: string, messageId?: string): number {
     let boundary: number | undefined

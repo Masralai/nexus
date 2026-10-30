@@ -35,6 +35,8 @@ export interface RunConfig {
   mode?: AgentMode
   /** Active agent skills injected into the system channel. */
   skills?: Skill[]
+  /** Custom agent selected for this Turn. */
+  agent?: { prompt?: string; tools?: string[]; mode?: AgentMode }
   /** Preloaded instruction files. When omitted, AGENTS.md discovery runs for cwd. */
   instructions?: InstructionFile[]
   /** Additional instruction files from config. */
@@ -57,6 +59,7 @@ export interface RunConfig {
   pty?: import("./types").PtyControl
   lsp?: import("./types").LspControl
   mcp?: import("./types").McpControl
+  worktree?: import("./types").WorktreeControl
   afterEdit?: (paths: string[]) => Promise<string[]>
   /** In unattended mode, refuse outside-cwd writes unless explicitly allowed. */
   workspaceBoundary?: boolean
@@ -106,8 +109,12 @@ function isAbort(e: unknown, signal?: AbortSignal): boolean {
 }
 
 export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncIterable<EngineEvent> {
-  const { provider, registry, cwd, model, maxSteps } = cfg
-  const mode = cfg.mode ?? "build"
+  const { provider, registry: allRegistry, cwd, model, maxSteps } = cfg
+  const registry =
+    cfg.agent?.tools && cfg.agent.tools.length > 0
+      ? new Map([...allRegistry].filter(([name]) => cfg.agent!.tools!.includes(name)))
+      : allRegistry
+  const mode = cfg.mode ?? cfg.agent?.mode ?? "build"
   const policy = modePolicy(mode)
   const rules = mergeRules(policy.rules, cfg.rules)
   const store = cfg.store
@@ -140,6 +147,7 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
     skills: cfg.skills,
     instructions,
     tools: [...registry.values()],
+    agentPrompt: cfg.agent?.prompt,
     environment: {
       cwd,
       platform: `${process.platform} ${process.arch}`,
@@ -354,6 +362,7 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
           pty: cfg.pty,
           lsp: cfg.lsp,
           mcp: cfg.mcp,
+          worktree: cfg.worktree,
           afterEdit: cfg.afterEdit,
         }
         const result = await tool.execute(call.input, ctx)

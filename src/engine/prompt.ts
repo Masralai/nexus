@@ -20,6 +20,8 @@ export interface PromptInput {
   skills?: Skill[]
   instructions?: readonly InstructionFile[]
   tools?: readonly Pick<Tool, "name">[]
+  /** Custom agent instructions from configuration. */
+  agentPrompt?: string
   environment: EnvironmentInfo
 }
 
@@ -105,6 +107,7 @@ export function renderSystemPrompt(input: PromptInput): string {
   // Stable prefix first, then instructions, then the environment block (date
   // and git state vary), keeping the cacheable prefix as long as possible.
   const sections = [BASE, guidance.trim() ? guidance.trim() : `Mode: ${input.mode}`]
+  if (input.agentPrompt?.trim()) sections.push(`Agent instructions:\n${input.agentPrompt.trim()}`)
   if (toolBlock) sections.push(`Tool guidance:\n${toolBlock}`)
   if (instructionText) sections.push(`Project instructions:\n${instructionText}`)
   if (skillText) sections.push(skillText)

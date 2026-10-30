@@ -85,6 +85,8 @@ export interface ToolContext {
   lsp?: LspControl
   /** MCP servers with tools/resources/prompts. */
   mcp?: McpControl
+  /** Git worktree isolation. */
+  worktree?: WorktreeControl
   /** Optional post-edit formatter/diagnostics hook. */
   afterEdit?: (paths: string[]) => Promise<string[]>
 }
@@ -169,11 +171,27 @@ export interface JobControl {
   get(id: string): JobInfo | undefined
   list(sessionId?: string): JobInfo[]
   kill(id: string): boolean
+  /** Completed background work delivered to the Session, newest last. */
+  inbox(sessionId: string): InboxItem[]
 }
 
 export interface PtyControl {
   run(sessionId: string, command: string, opts?: { cwd?: string; timeoutMs?: number; onOutput?: (chunk: string) => void }): Promise<{ output: string; exitCode: number }>
   close(sessionId?: string): void
+}
+
+export interface WorktreeEntry {
+  directory: string
+  branch?: string
+  commit?: string
+  /** True for the repository's main working tree. */
+  root?: boolean
+}
+
+export interface WorktreeControl {
+  create(input?: { name?: string; branch?: string; from?: string; directory?: string }): Promise<{ directory: string; branch: string }>
+  list(): Promise<WorktreeEntry[]>
+  remove(input: { directory: string; force?: boolean }): Promise<void>
 }
 
 export interface LspLocation {

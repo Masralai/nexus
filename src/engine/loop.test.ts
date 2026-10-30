@@ -723,8 +723,7 @@ test("a single long turn never re-appends the active request as a summary", asyn
   expect(evts.at(-1)).toMatchObject({ type: "runComplete", result: "done" })
 })
 
-test("question tool waits on the tool-call id, not the session id", async () => {
-  const seen: string[] = []
+test("question tool waits on the tool-call id, not the session id", async () => {  const seen: string[] = []
   const ask: Tool = {
     name: "question",
     description: "ask",
@@ -764,4 +763,39 @@ test("question tool waits on the tool-call id, not the session id", async () => 
   expect(seen).toEqual(["q1"])
   expect(evts.some((e) => e.type === "questionRequest" && e.id === "q1")).toBe(true)
   expect(evts.some((e) => e.type === "toolResult" && e.id === "q1" && e.result.output === "A")).toBe(true)
+})
+
+test("a custom agent narrows advertised tools and adds instructions", async () => {
+  const other: Tool = {
+    name: "other",
+    description: "not allowed for this agent",
+    schema: {},
+    readonly: true,
+    async execute() {
+      return { ok: true, output: "wrong" }
+    },
+  }
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "c1", name: "other", input: {} }] },
+    { content: "done" },
+  ])
+  const evts = await collect(
+    run([{ role: "user", content: "go" }], cfg({
+      provider,
+      registry: new Map([
+        ["echo", echo],
+        ["other", other],
+      ]),
+      autoApprove: true,
+      agent: { prompt: "You are the release agent.", tools: ["echo"] },
+    })),
+  )
+  expect(provider.lastTools.map((tool) => tool.name)).toEqual(["echo"])
+  expect(provider.lastSystem).toContain("You are the release agent.")
+  expect(evts).toContainEqual({
+    type: "toolResult",
+    id: "c1",
+    name: "other",
+    result: { ok: false, output: "", error: "unknown tool: other" },
+  })
 })
