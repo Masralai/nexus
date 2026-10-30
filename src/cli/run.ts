@@ -192,6 +192,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     })
   } finally {
     process.off("SIGINT", onSig)
+    await runtime.close?.()
   }
 }
 
