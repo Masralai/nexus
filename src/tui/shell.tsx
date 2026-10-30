@@ -8,7 +8,8 @@ import {
   saveConfig,
 } from "../cli/config"
 import { setCredential } from "../cli/credentials"
-import { launchRuntime, runTurn } from "../cli/launch"
+import { expandCommand, findAgent, findCommand, configuredCommands, type ResolvedAgent } from "../cli/commands"
+import { launchRuntime, runTurn, type Runtime } from "../cli/launch"
 import { openSessionStore } from "../engine/store"
 import type { Message } from "../engine/types"
 import type { AgentMode } from "../engine/mode"
@@ -70,10 +71,23 @@ export function Shell() {
   const [log, setLog] = useState<string[]>([])
   const [mode, setMode] = useState<AgentMode>("build")
   const [activeSkills, setActiveSkills] = useState<Skill[]>([])
+  const [activeAgent, setActiveAgent] = useState<ResolvedAgent | null>(null)
   const acRef = useRef<AbortController | null>(null)
   const [selAnchor, setSelAnchor] = useState<SelectionAnchor | undefined>()
   const [selActive, setSelActive] = useState<SelectionAnchor | undefined>()
   const selDragging = useRef(false)
+  const runtimeRef = useRef<{ key: string; runtime: Runtime } | null>(null)
+
+  // One runtime per workspace/model so a PTY, MCP clients and background jobs
+  // survive between Turns in the same shell.
+  function runtimeForWorkspace(model?: string): Runtime {
+    const key = `${process.cwd()}\0${model ?? loadConfig().model}`
+    if (runtimeRef.current?.key === key) return runtimeRef.current.runtime
+    if (runtimeRef.current) void runtimeRef.current.runtime.close?.()
+    const runtime = launchRuntime({ store, ...(model ? { model } : {}) })
+    runtimeRef.current = { key, runtime }
+    return runtime
+  }
 
   const pushLog = (line: string) => setLog((l) => [...l, line])
 
@@ -134,6 +148,13 @@ export function Shell() {
   }
 
   useEffect(() => cancelSmooth, [])
+
+  useEffect(() => {
+    return () => {
+      void runtimeRef.current?.runtime.close?.()
+      runtimeRef.current = null
+    }
+  }, [])
 
   useEffect(() => {
     if (overlay) cancelSmooth()
@@ -340,6 +361,40 @@ export function Shell() {
     activateSkill(skill)
   }
 
+  function startAgentFlow() {
+    const cfg = loadConfig()
+    const agents = Object.keys(cfg.agents ?? {})
+    if (agents.length === 0) {
+      pushLog("no custom agents configured under agents in .nexus.json")
+      return
+    }
+    setOverlay({
+      kind: "picker",
+      title: "Select custom agent (/agent)",
+      searchable: true,
+      items: [
+        ...agents.map((id) => ({
+          id,
+          label: `${id}${cfg.agents?.[id]?.description ? ` — ${cfg.agents[id].description}` : ""}`,
+        })),
+        ...(activeAgent ? [{ id: "__none__", label: "Clear custom agent" }] : []),
+      ],
+      then: (id) => {
+        setOverlay(null)
+        if (id === "__none__") {
+          setActiveAgent(null)
+          pushLog("custom agent cleared")
+          return
+        }
+        const agent = findAgent(cfg, id)
+        if (!agent) return
+        setActiveAgent(agent)
+        if (agent.config.mode) setMode(agent.config.mode)
+        pushLog(`agent: ${agent.id}`)
+      },
+    })
+  }
+
   function startResumeFlow() {
     const sessions = store.listWithTitles()
     if (sessions.length === 0) {
@@ -368,20 +423,28 @@ export function Shell() {
     })
   }
 
-  async function runTurnUi(userText: string) {
+  async function runTurnUi(userText: string, opts: { agent?: ResolvedAgent } = {}) {
     if (!hasResolvableKey()) {
       pushLog("not connected — run /key")
       startKeyFlow()
       return
     }
+    const selectedAgent = opts.agent ?? activeAgent ?? undefined
+    const agent = selectedAgent
+      ? {
+          ...(selectedAgent.config.prompt ? { prompt: selectedAgent.config.prompt } : {}),
+          ...(selectedAgent.config.tools ? { tools: selectedAgent.config.tools } : {}),
+          ...(selectedAgent.config.mode ? { mode: selectedAgent.config.mode } : {}),
+        }
+      : undefined
     const nextMsgs = [...messages, { role: "user" as const, content: userText }]
     setMessages(nextMsgs)
     setBusy(true)
     setBusySince(Date.now())
-    setLive(initialTUIState(loadConfig().model || "?"))
+    setLive(initialTUIState(selectedAgent?.config.model ?? (loadConfig().model || "?")))
     const ac = new AbortController()
     acRef.current = ac
-    const runtime = launchRuntime({ store })
+    const runtime = runtimeForWorkspace(selectedAgent?.config.model)
     const resume = created
     if (!created) setCreated(true)
 
@@ -393,8 +456,10 @@ export function Shell() {
         sessionId,
         signal: ac.signal,
         resume,
-        mode,
+        mode: agent?.mode ?? mode,
         skills: activeSkills,
+        agent,
+        ...(selectedAgent?.config.model ? { model: selectedAgent.config.model } : {}),
         askPermission: (req) =>
           new Promise<boolean>((resolve) => {
             setOverlay({
@@ -433,10 +498,17 @@ export function Shell() {
 
   function handleSlash(raw: string) {
     const cmd = parseSlash(raw)
-    if (cmd === "help") pushLog(HELP)
-    else if (cmd === "quit" || cmd === "exit") exit()
+    if (cmd === "help") {
+      const custom = configuredCommands(loadConfig())
+      pushLog(
+        custom.length
+          ? `${HELP}\n\ncustom:\n${custom.map((c) => `/${c.name.padEnd(7)} ${c.description ?? c.template.slice(0, 60)}`).join("\n")}`
+          : HELP,
+      )
+    } else if (cmd === "quit" || cmd === "exit") exit()
     else if (cmd === "key") startKeyFlow()
     else if (cmd === "model") startModelFlow()
+    else if (cmd === "agent") startAgentFlow()
     else if (cmd === "skill" || cmd === "skills") handleSkillCommand(parseSlashArgs(raw))
     else if (cmd === "resume") startResumeFlow()
     else if (cmd === "plan") {
@@ -450,10 +522,28 @@ export function Shell() {
       setMessages([])
       setCreated(false)
       setActiveSkills([])
+      setActiveAgent(null)
       setLog([])
       setChrome((c) => ({ ...initialChrome(), history: c.history }))
       setLive(initialTUIState(loadConfig().model || "?"))
     } else {
+      const cfg = loadConfig()
+      const custom = findCommand(cfg, cmd)
+      if (custom) {
+        const args = parseSlashArgs(raw)
+        const agent = custom.agent ? findAgent(cfg, custom.agent) : undefined
+        if (custom.agent && !agent) {
+          pushLog(`unknown agent: ${custom.agent} — command /${custom.name} not run`)
+          return
+        }
+        const text = expandCommand(custom.template, args)
+        if (!text) {
+          pushLog(`command /${custom.name} expanded to an empty prompt`)
+          return
+        }
+        void runTurnUi(text, agent ? { agent } : {})
+        return
+      }
       const skill = findSkill(discoverSkills(), cmd)
       if (skill) activateSkill(skill)
       else pushLog(`unknown command: /${cmd} — type / for options`)
