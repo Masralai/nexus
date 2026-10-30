@@ -12,15 +12,21 @@ interface Shell {
 const DEFAULT_TIMEOUT = 30_000
 
 /** Strip terminal echo and ANSI control sequences from captured PTY output. */
-function clean(text: string, command: string): string {
+function clean(text: string, command: string, marker: string): string {
   let out = text.replace(/\r/g, "")
-  // The first line is usually the shell echoing the command.
-  const lines = out.split("\n")
-  if (lines[0]?.trim() === command.trim()) lines.shift()
-  out = lines.join("\n")
   // Remove common CSI/OSC sequences.
   out = out.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-  return out.replace(/^\n+/, "").replace(/\n+$/, "")
+  const lines = out
+    .split("\n")
+    // The terminal echoes the `printf` marker command before running it.
+    .filter((line) => !line.includes(marker))
+    // Bash prints these when the pty is not a controlling terminal (CI, pipes).
+    .filter((line) => !/^bash: cannot set terminal process group/.test(line.trim()))
+    .filter((line) => !/^bash: no job control in this shell$/.test(line.trim()))
+  // Drop the echoed command (it can arrive twice: tty echo and shell echo).
+  while (lines.length > 0 && (lines[0].trim() === "" || lines[0].trim() === command.trim())) lines.shift()
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop()
+  return lines.join("\n")
 }
 
 function shellFor(shells: Map<string, Shell>, key: string, cwd: string): Shell {
@@ -35,16 +41,20 @@ function shellFor(shells: Map<string, Shell>, key: string, cwd: string): Shell {
       const text = new TextDecoder().decode(data)
       bufferRef.value += text
       for (const waiter of [...pending]) {
-        const idx = bufferRef.value.indexOf(waiter.marker)
-        if (idx === -1) continue
-        const tail = bufferRef.value.slice(idx + waiter.marker.length)
-        const codeMatch = /^:(\d+)/.exec(tail)
-        if (!codeMatch) continue
+        // The terminal echoes the command, so the marker appears twice: once in
+        // the echoed `printf` line (followed by `%s`) and once in the output
+        // (followed by the exit code). Only the latter is a real completion.
+        const pattern = new RegExp(`${waiter.marker}:(\\d+)`, "g")
+        let match: RegExpExecArray | null
+        let found: RegExpExecArray | null = null
+        while ((match = pattern.exec(bufferRef.value))) found = match
+        if (!found) continue
+        const idx = found.index
+        const exitCode = Number(found[1])
         pending.splice(pending.indexOf(waiter), 1)
         clearTimeout(waiter.timer)
         const output = bufferRef.value.slice(0, idx)
-        const exitCode = Number(codeMatch[1])
-        bufferRef.value = tail.slice(codeMatch[0].length)
+        bufferRef.value = bufferRef.value.slice(idx + found[0].length)
         waiter.resolve({ output, exitCode })
       }
     },
@@ -101,33 +111,38 @@ export class PtyManager implements PtyControl {
     ;(shell as unknown as { queue?: Promise<unknown> }).queue = previous.then(() => gate)
     await previous
 
-    const start = shell.buffer.length
-    const done = new Promise<{ output: string; exitCode: number }>((resolve, reject) => {
-      const waiter = {
-        marker,
-        resolve,
-        timer: setTimeout(() => {
-          shell.waiters.splice(shell.waiters.indexOf(waiter), 1)
-          try {
-            shell.terminal.write("\x03")
-          } catch {
-            /* closed */
-          }
-          reject(new Error(`command timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT}ms`))
-        }, opts.timeoutMs ?? DEFAULT_TIMEOUT),
-      }
-      shell.waiters.push(waiter)
-    })
+    try {
+      const start = shell.buffer.length
+      const done = new Promise<{ output: string; exitCode: number }>((resolve, reject) => {
+        const waiter = {
+          marker,
+          resolve,
+          timer: setTimeout(() => {
+            shell.waiters.splice(shell.waiters.indexOf(waiter), 1)
+            try {
+              shell.terminal.write("\x03")
+            } catch {
+              /* closed */
+            }
+            reject(new Error(`command timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT}ms`))
+          }, opts.timeoutMs ?? DEFAULT_TIMEOUT),
+        }
+        shell.waiters.push(waiter)
+      })
 
-    const before = shell.buffer.length
-    shell.terminal.write(`${command}\nprintf '\\n${marker}:%s\\n' "$?"\n`)
-    // Some commands emit output before the marker is registered in the next
-    // microtask. The waiter owns all output since the write boundary.
-    const result = await done
-    const raw = result.output.length >= before ? result.output : shell.buffer.slice(start)
-    const output = clean(raw, command)
-    if (output) opts.onOutput?.(output)
-    return { output, exitCode: result.exitCode }
+      const before = shell.buffer.length
+      shell.terminal.write(`${command}\nprintf '\\n${marker}:%s\\n' "$?"\n`)
+      // Some commands emit output before the marker is registered in the next
+      // microtask. The waiter owns all output since the write boundary.
+      const result = await done
+      const raw = result.output.length >= before ? result.output : shell.buffer.slice(start)
+      const output = clean(raw, command, marker)
+      if (output) opts.onOutput?.(output)
+      return { output, exitCode: result.exitCode }
+    } finally {
+      // Always hand the PTY to the next queued command, including on timeout.
+      release()
+    }
   }
 
   close(sessionId?: string): void {

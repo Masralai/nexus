@@ -95,6 +95,19 @@ test("list respects path and errors on missing dir", async () => {
   expect(missing.ok).toBe(false)
 })
 
+test("list shares gitignore semantics with glob and grep", async () => {
+  const dir = tmp()
+  Bun.spawnSync(["git", "init", "-q"], { cwd: dir })
+  writeFileSync(join(dir, ".gitignore"), "ignored.txt\n")
+  writeFileSync(join(dir, "kept.txt"), "")
+  writeFileSync(join(dir, "ignored.txt"), "")
+  mkdirSync(join(dir, "sub"))
+  writeFileSync(join(dir, "sub", "inner.txt"), "")
+  const r = await list.execute({}, ctx(dir))
+  expect(r.ok).toBe(true)
+  expect(r.output.split("\n").sort()).toEqual(["kept.txt", "sub/"])
+})
+
 test("default tools mark read/glob/grep/list readonly", () => {
   const byName = Object.fromEntries(defaultTools().map((t) => [t.name, t.readonly]))
   expect(byName.read).toBe(true)

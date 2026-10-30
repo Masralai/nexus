@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import type { Tool, ToolContext } from "../engine/types"
 import { isReadonlyTool } from "../engine/mode"
 import { run } from "../engine/loop"
@@ -86,6 +87,30 @@ export const task: Tool = {
 
     const childMessages = [{ role: "user" as const, content: childPrompt }]
 
+    // Persist sub-agent work as a real child Session so the parent history can
+    // explain what the sub-agent did, and the child is inspectable on its own.
+    let childSessionId: string | undefined
+    if (ctx.store && ctx.sessionId) {
+      const id = `ses_${randomUUID()}`
+      try {
+        ctx.store.create(
+          {
+            id,
+            cwd: ctx.cwd,
+            model: ctx.model ?? "unknown",
+            provider: provider.id,
+            createdAt: new Date().toISOString(),
+            parentId: ctx.sessionId,
+            title: `task: ${prompt.split("\n")[0].slice(0, 80)}`,
+          },
+          childMessages,
+        )
+        childSessionId = id
+      } catch {
+        childSessionId = undefined
+      }
+    }
+
     // Use parent signal directly for abort propagation; combine if AbortSignal.any available
     let signal = ctx.signal
     // If AbortSignal.any is available and we want child-specific abort, we could create a combined signal
@@ -103,9 +128,9 @@ export const task: Tool = {
         model: ctx.model ?? "mock",
         maxSteps: DEFAULT_CHILD_MAX_STEPS,
         signal,
-        // No store -> ephemeral, does not pollute parent Session
-        store: undefined,
-        sessionId: undefined,
+        store: childSessionId ? ctx.store : undefined,
+        sessionId: childSessionId,
+        resume: Boolean(childSessionId),
         compactProvider: ctx.compactProvider,
         compactThreshold: ctx.compactThreshold,
         keepRecent: ctx.keepRecent,
@@ -134,6 +159,13 @@ export const task: Tool = {
         }
       }
     } catch (e) {
+      if (childSessionId) {
+        try {
+          ctx.store?.setStatus(childSessionId, "error")
+        } catch {
+          /* best effort */
+        }
+      }
       return { ok: false, output: cap(outputs.join("\n")), error: e instanceof Error ? e.message : String(e) }
     }
 
@@ -153,6 +185,7 @@ export const task: Tool = {
       summary += outputs.join("\n")
     }
     if (!summary) summary = "(no output)"
+    if (childSessionId) summary += `\n\nchild session: ${childSessionId}`
 
     return { ok: true, output: cap(summary) }
   },

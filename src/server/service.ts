@@ -291,6 +291,8 @@ export class SessionService {
     for (const id of this.active.keys()) this.rejectPending(id)
     for (const turn of this.active.values()) turn.controller.abort()
     await Promise.allSettled([...this.active.values()].map((turn) => turn.promise))
+    await Promise.allSettled([...this.runtimes.values()].map((runtime) => runtime.close?.()))
+    this.runtimes.clear()
     this.listeners.clear()
   }
 

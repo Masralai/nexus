@@ -8,7 +8,9 @@ import { todowrite, todoread } from "./todo"
 import { question } from "./question"
 import { lsp } from "./lsp"
 import { task } from "./task"
-import { allFiles, displayPath, isBinaryLike } from "./walk"
+import { inbox, job_kill, job_list, job_start, job_status } from "./jobs"
+import { worktree_create, worktree_list, worktree_remove } from "./worktree"
+import { allFiles, displayPath, gitFiles, isBinaryLike } from "./walk"
 import {
   atomicWrite,
   checkFresh,
@@ -240,16 +242,37 @@ export const bash: Tool = {
 export const list: Tool = {
   name: "list",
   description:
-    "List files and directories in a path. Prefer this over bash ls. Input: { path? }. For multiple directories, emit N parallel list calls.",
-  schema: { type: "object", properties: { path: { type: "string" } } },
+    "List files and directories in a path. Prefer this over bash ls. Input: { path?, includeHidden? }. Shares gitignore semantics with glob and grep inside a repository. For multiple directories, emit N parallel list calls.",
+  schema: {
+    type: "object",
+    properties: { path: { type: "string" }, includeHidden: { type: "boolean" } },
+  },
   readonly: true,
   outputLimit: 16_000,
   async execute(input, ctx) {
-    const { path } = (input ?? {}) as { path?: string }
+    const { path, includeHidden } = (input ?? {}) as { path?: string; includeHidden?: boolean }
     const dir = resolve(ctx.cwd, path ?? ".")
     try {
-      const lines = readdirSync(dir, { withFileTypes: true })
-        .filter((e) => e.name !== ".git")
+      const entries = readdirSync(dir, { withFileTypes: true }).filter((e) => e.name !== ".git")
+      // Inside a repository, listing shares gitignore semantics with glob and
+      // grep so the model sees the same file set everywhere. Outside a repo the
+      // plain directory view is kept.
+      const tracked = gitFiles(ctx.cwd)
+      const visible = tracked
+        ? includeHidden
+          ? new Set(tracked)
+          : new Set(tracked.filter((file) => !file.split("/").some((part) => part.startsWith("."))))
+        : undefined
+      const prefix = relative(ctx.cwd, dir).split("\\").join("/")
+      const base = prefix && prefix !== "." ? `${prefix}/` : ""
+      const kept = visible
+        ? entries.filter((entry) => {
+            const rel = `${base}${entry.name}`
+            if (entry.isDirectory()) return [...visible].some((file) => file.startsWith(`${rel}/`))
+            return visible.has(rel)
+          })
+        : entries
+      const lines = kept
         .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
         .sort()
       return { ok: true, output: cap(lines.join("\n")) }
@@ -428,9 +451,35 @@ export { todowrite, todoread } from "./todo"
 export { question } from "./question"
 export { lsp } from "./lsp"
 export { task } from "./task"
+export { inbox, job_kill, job_list, job_start, job_status } from "./jobs"
+export { worktree_create, worktree_list, worktree_remove } from "./worktree"
 
 export function defaultTools(): Tool[] {
-  return [read, write, edit, bash, glob, grep, list, apply_patch, undo, snapshots, todowrite, todoread, question, lsp, task]
+  return [
+    read,
+    write,
+    edit,
+    bash,
+    glob,
+    grep,
+    list,
+    apply_patch,
+    undo,
+    snapshots,
+    todowrite,
+    todoread,
+    question,
+    lsp,
+    task,
+    job_start,
+    job_status,
+    job_list,
+    job_kill,
+    inbox,
+    worktree_create,
+    worktree_list,
+    worktree_remove,
+  ]
 }
 
 /** @deprecated Prefer tool.readonly / isReadonlyTool — kept for any external imports. */

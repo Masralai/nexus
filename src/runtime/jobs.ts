@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import type { SQLiteStore } from "../engine/sqlite"
-import type { JobControl, JobInfo } from "../engine/types"
+import type { InboxItem, JobControl, JobInfo } from "../engine/types"
 
 const MAX_CAPTURE = 200_000
 
@@ -94,6 +94,10 @@ export class JobManager implements JobControl {
 
   list(sessionId?: string): JobInfo[] {
     return this.store.listJobs(sessionId).map((j) => this.info(j.id)!).filter(Boolean)
+  }
+
+  inbox(sessionId: string): InboxItem[] {
+    return this.store.listInbox(sessionId)
   }
 
   kill(id: string): boolean {

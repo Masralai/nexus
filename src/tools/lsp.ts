@@ -1,9 +1,5 @@
 import type { Tool } from "../engine/types"
 
-function isEnabled(): boolean {
-  return process.env.NEXUS_EXPERIMENTAL_LSP_TOOL === "true" || process.env.NEXUS_EXPERIMENTAL === "true"
-}
-
 export const lsp: Tool = {
   name: "lsp",
   description:
@@ -22,7 +18,6 @@ export const lsp: Tool = {
   readonly: true,
   outputLimit: 12_000,
   async execute(input, ctx) {
-    if (!isEnabled()) return { ok: false, output: "", error: "lsp disabled — set NEXUS_EXPERIMENTAL_LSP_TOOL=true" }
     if (!ctx.lsp) return { ok: false, output: "", error: "no lsp servers configured" }
     return ctx.lsp.query(input as { operation: string; file?: string; line?: number; character?: number; query?: string })
   },
