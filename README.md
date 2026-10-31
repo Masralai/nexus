@@ -41,8 +41,9 @@ Use it as an interactive shell for day-to-day coding or as a headless one-shot r
 - **Two agent modes** — `plan` (read-only, auto-allowed) and `build` (full tools with approval)
 - **Permission gate** — readonly tools inside the session cwd are auto-allowed; `write`/`edit`/`bash` and paths outside cwd always ask (`src/engine/permission.ts:17`)
 - **Six focused tools** — `read`, `write`, `edit`, `bash`, `list`, `glob`, `grep`, plus patch, snapshots, jobs, LSP, sub-agents, and git worktrees (`src/tools/index.ts`)
-- **Durable sessions** — SQLite at `~/.nexus/nexus.db` with typed parts and a one-time legacy JSONL import (`src/engine/sqlite.ts`, `nexus migrate`)
-- **Real prompt architecture** — policy and environment in the provider system channel, layered `AGENTS.md` discovery, per-tool truncation, and pairing-safe compaction (`src/engine/prompt.ts`, `src/engine/instructions.ts`, `src/engine/compact.ts`)
+- **Durable sessions** — SQLite at `~/.nexus/nexus.db` with typed parts, revert/fork, JSON/Markdown export and import, and a one-time legacy JSONL migration (`src/engine/sqlite.ts`, `nexus migrate`)
+- **Real prompt architecture** — policy and environment in the provider system channel, layered `AGENTS.md` discovery, per-tool truncation, pairing-safe compaction, and generated Session titles (`src/engine/prompt.ts`, `src/engine/instructions.ts`, `src/engine/compact.ts`, `src/engine/title.ts`)
+- **Steering and accounting** — input typed during a Turn is queued and applied at the next provider boundary; every Session exposes token, cache and cost counters plus its effective catalog entry
 - **Skills** — reusable instruction packs from `.agents/skills` injected into context (`src/skills/index.ts:87`)
 - **Commands, agents, and plugins** — config-defined slash commands, custom agent prompts/tool sets, and isolated local plugin modules (`src/cli/commands.ts`, `src/plugins/load.ts`)
 - **Ink TUI** — live turn view, stream viewport, mouse wheel scroll, permission picker (`src/tui/shell.tsx:44`)
@@ -127,7 +128,7 @@ nexus run "add tests for session resume" --yes
 nexus                 # opens the Ink shell in the current directory
 ```
 
-Composer keys: `Enter` send, `Up`/`Down` history, `Ctrl+U`/`Ctrl+D` or mouse wheel to scroll, `Shift+Tab` toggle plan/build, `Ctrl+C` abort turn (second press exits).
+Composer keys: `Enter` send, `Up`/`Down` history, `Ctrl+U`/`Ctrl+D` or mouse wheel to scroll, `Shift+Tab` toggle plan/build, `Ctrl+C` abort turn (second press exits). While a Turn runs, keep typing and press `Enter` to steer; the line is queued and applied at the next safe boundary.
 
 Slash commands (`src/tui/slash.ts:7`):
 
@@ -185,6 +186,19 @@ nexus resume 5467a7c8-...          # exact session id
 
 Sessions live in SQLite at `~/.nexus/nexus.db` (override with `NEXUS_DB`). Each message is stored as typed parts (`text`, `tool_call`, `tool_result`, `compaction`). Existing JSONL sessions are imported once with `nexus migrate [dir]` (default `~/.nexus/sessions`).
 
+### Revert, fork, and export
+
+```bash
+nexus export <id>                        # JSON to stdout (round-trip format)
+nexus export <id> --format markdown      # human-readable transcript
+nexus export <id> --out session.json
+nexus import session.json                # idempotent: existing ids are skipped
+nexus revert <id> [--at <message-id>]    # drop that message and everything after it
+nexus fork <id> [--at <message-id>]      # branch before a boundary; prints the new id
+```
+
+HTTP clients use the same capabilities: `POST /api/session/:id/revert`, `POST /api/session/:id/fork`, `GET /api/session/:id/export`, `POST /api/session/import`, `GET /api/session/:id/usage` and `GET /api/session/:id/message` (messages carry stable `id` fields).
+
 ## Configuration
 
 ### Config file
@@ -224,6 +238,8 @@ Sessions live in SQLite at `~/.nexus/nexus.db` (override with `NEXUS_DB`). Each 
 | `maxSteps` | `NEXUS_MAX_STEPS` | `50` |
 | `compactModel` | `NEXUS_COMPACT_MODEL` | smallest suggested model for the active preset |
 | `compactThreshold` | `NEXUS_COMPACT_THRESHOLD` | `0.8` |
+| `titleModel` | — | `compactModel` |
+| `autoTitle` | — | `true` |
 | `baseUrl` | `NEXUS_BASE_URL` (custom endpoints) | per preset |
 
 ### Presets and providers
@@ -322,7 +338,7 @@ sessions         id, cwd, model, provider, title, status, created_at
 session_parts    session_id, message_id, seq, part_type, data, message_json
 ```
 
-Status is one of `running`, `done`, `aborted`, `error`, or `limit` (step limit reached). Compaction summaries are stored as synthetic `compaction` parts.
+Status is one of `running`, `done`, `aborted`, `error`, or `limit` (step limit reached). Compaction summaries are stored as synthetic `compaction` parts. Forks record `parent_id` and `fork_boundary`; reverts remove the boundary message and everything after it. Token, cache, reasoning and cost counters are persisted per Session, and the API returns the matching catalog entry alongside usage.
 
 **Skills** are `SKILL.md` files with optional YAML frontmatter (`name`, `description`). Active skills are concatenated (capped at 12k chars each) into the system prompt for every Turn step (`src/skills/index.ts`).
 

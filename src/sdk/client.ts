@@ -90,6 +90,38 @@ export class NexusClient {
     return this.request<void>("sessionDelete", { sessionID })
   }
 
+  revertSession(sessionID: string, messageID?: string) {
+    return this.request<Record<string, unknown>>(
+      "sessionRevert",
+      { sessionID },
+      { body: JSON.stringify(messageID ? { messageID } : {}) },
+    )
+  }
+
+  forkSession(sessionID: string, opts: { messageID?: string; title?: string } = {}) {
+    return this.request<Record<string, unknown>>(
+      "sessionFork",
+      { sessionID },
+      { body: JSON.stringify(opts) },
+    )
+  }
+
+  exportSession(sessionID: string) {
+    return this.request<Record<string, unknown>>("sessionExport", { sessionID })
+  }
+
+  importSession(body: Record<string, unknown>) {
+    return this.request<{ session: Record<string, unknown>; imported: boolean }>(
+      "sessionImport",
+      {},
+      { body: JSON.stringify(body) },
+    )
+  }
+
+  sessionUsage(sessionID: string) {
+    return this.request<Record<string, unknown>>("sessionUsage", { sessionID })
+  }
+
   messages(sessionID: string, limit?: number) {
     return this.request<unknown[]>("messages", { sessionID }, { query: { limit } })
   }

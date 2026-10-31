@@ -46,6 +46,8 @@ export interface Runtime {
   cfg: NexusConfig
   provider: Provider
   compactProvider: Provider
+  /** Cheap provider for generated Session titles; falls back to compactModel. */
+  titleProvider?: Provider
   registry: Map<string, Tool>
   store: SessionStore
   bus?: EventBus<EngineEvent>
@@ -88,6 +90,20 @@ function snapshotStore(store: SessionStore): SnapshotStore | undefined {
   return typeof candidate.saveSnapshot === "function" && typeof candidate.getSnapshot === "function"
     ? (candidate as SnapshotStore)
     : undefined
+}
+
+interface PendingStore {
+  takePending(sessionId: string, kind?: string): Array<{ kind: string; data: unknown }>
+}
+
+/** Queued user input for steering, read atomically between provider calls. */
+function pendingInput(store: SessionStore, sessionId: string): Message[] {
+  const candidate = store as unknown as Partial<PendingStore>
+  if (typeof candidate.takePending !== "function") return []
+  return candidate
+    .takePending(sessionId, "prompt")
+    .map((item) => (item.data as { message?: Message }).message)
+    .filter((message): message is Message => message?.role === "user")
 }
 
 /** Resolve the tools that make up a default registry. */
@@ -142,13 +158,12 @@ export function launchRuntime(opts: LaunchOpts = {}): Runtime {
 
   let readyPromise: Promise<void> | undefined
   let pluginErrors: Array<{ path: string; message: string }> = []
+  const compactModel = cfg.compactModel || defaultCompactModel(cfg.preset, cfg.provider, cfg.model)
   return {
     cfg,
     provider: createProvider({ ...common, model: cfg.model }),
-    compactProvider: createProvider({
-      ...common,
-      model: cfg.compactModel || defaultCompactModel(cfg.preset, cfg.provider, cfg.model),
-    }),
+    compactProvider: createProvider({ ...common, model: compactModel }),
+    titleProvider: createProvider({ ...common, model: cfg.titleModel || compactModel }),
     registry,
     store,
     bus: new EventBus<EngineEvent>(),
@@ -288,6 +303,7 @@ export async function* runTurn(opts: TurnOpts): AsyncIterable<EngineEvent> {
     autoApprove: opts.autoApprove,
     workspaceBoundary: opts.workspaceBoundary ?? rt.cfg.workspaceBoundary,
     resume: opts.resume,
+    pendingInput: () => pendingInput(rt.store, sessionId),
     mode: opts.mode,
     skills: opts.skills,
     agent: opts.agent,

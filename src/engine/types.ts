@@ -271,6 +271,7 @@ export interface SessionStore {
 }
 
 export type EngineEvent =
+  | { type: "messageAdded"; message: Message; queued?: boolean }
   | { type: "tokenDelta"; delta: string }
   | { type: "toolCallStarted"; id: string; name: string; input: unknown }
   | { type: "toolResult"; id: string; name: string; result: ToolResult }

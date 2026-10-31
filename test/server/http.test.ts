@@ -53,7 +53,7 @@ interface TestServer {
 }
 
 async function withServer(
-  opts: { script?: MockResponse[]; tools?: Tool[]; config?: Partial<NexusConfig> },
+  opts: { script?: MockResponse[]; tools?: Tool[]; config?: Partial<NexusConfig>; title?: MockResponse[] },
   run: (ctx: TestServer) => Promise<void>,
 ): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "nexus-server-"))
@@ -62,6 +62,7 @@ async function withServer(
     cfg: testConfig(opts.config),
     provider: new MockProvider(opts.script ?? []),
     compactProvider: new MockProvider(),
+    ...(opts.title ? { titleProvider: new MockProvider(opts.title) } : {}),
     registry: new Map((opts.tools ?? []).map((tool) => [tool.name, tool])),
     store,
   }
@@ -382,6 +383,186 @@ test("exposes config, providers, models, agents, commands, and tools", async () 
         await call(server, "/api/tool?mode=build"),
       )
       expect(buildTools.data.some((tool) => tool.name === "write")).toBe(true)
+    },
+  )
+})
+
+test("sessions expose usage, model capabilities, and stable message ids", async () => {
+  await withServer(
+    {
+      script: [
+        { content: "hello", usage: { inputTokens: 1000, outputTokens: 100, cacheReadTokens: 200 } },
+      ],
+      config: { model: "gpt-4o" },
+    },
+    async ({ server }) => {
+      const created = await post(server, "/api/session", {})
+      const { data: session } = await json<{ data: { id: string } }>(created)
+      await post(server, `/api/session/${session.id}/prompt`, { text: "hi" })
+      await waitFor(async () => ((await sessionStatus(server, session.id)) === "done" ? true : undefined))
+
+      const fetched = await json<{
+        data: { usage: { inputTokens: number; outputTokens: number; cost: number }; modelInfo: { id: string } }
+      }>(await call(server, `/api/session/${session.id}`))
+      expect(fetched.data.usage).toMatchObject({ inputTokens: 1000, outputTokens: 100 })
+      expect(fetched.data.usage.cost).toBeGreaterThan(0)
+      expect(fetched.data.modelInfo.id).toBe("gpt-4o")
+
+      const usage = await json<{ data: { inputTokens: number; model: { id: string } } }>(
+        await call(server, `/api/session/${session.id}/usage`),
+      )
+      expect(usage.data.inputTokens).toBe(1000)
+      expect(usage.data.model.id).toBe("gpt-4o")
+
+      const messages = await json<{ data: Array<{ id: string; role: string }> }>(
+        await call(server, `/api/session/${session.id}/message`),
+      )
+      expect(messages.data.map((message) => message.role)).toEqual(["user", "assistant"])
+      expect(messages.data.every((message) => message.id.startsWith("msg_"))).toBe(true)
+    },
+  )
+})
+
+test("revert and fork operate on durable message boundaries", async () => {
+  await withServer(
+    { script: [{ content: "first" }, { content: "second" }] },
+    async ({ server }) => {
+      const created = await post(server, "/api/session", { title: "lifecycle" })
+      const { data: session } = await json<{ data: { id: string } }>(created)
+
+      await post(server, `/api/session/${session.id}/prompt`, { text: "one" })
+      await waitFor(async () => ((await sessionStatus(server, session.id)) === "done" ? true : undefined))
+      await post(server, `/api/session/${session.id}/prompt`, { text: "two" })
+      await waitFor(async () => ((await sessionStatus(server, session.id)) === "done" ? true : undefined))
+
+      const messages = await json<{ data: Array<{ id: string; role: string; content?: string }> }>(
+        await call(server, `/api/session/${session.id}/message`),
+      )
+      expect(messages.data.map((message) => message.content)).toEqual(["one", "first", "two", "second"])
+
+      const secondPrompt = messages.data[2]
+      const forked = await post(server, `/api/session/${session.id}/fork`, { messageID: secondPrompt.id })
+      expect(forked.status).toBe(201)
+      const { data: fork } = await json<{ data: { id: string; parentId: string; forkBoundary: string } }>(forked)
+      expect(fork.parentId).toBe(session.id)
+      expect(fork.forkBoundary).toBe(secondPrompt.id)
+      const forkMessages = await json<{ data: Array<{ content?: string }> }>(
+        await call(server, `/api/session/${fork.id}/message`),
+      )
+      expect(forkMessages.data.map((message) => message.content)).toEqual(["one", "first"])
+
+      const reverted = await post(server, `/api/session/${session.id}/revert`, { messageID: secondPrompt.id })
+      expect(reverted.status).toBe(200)
+      const after = await json<{ data: Array<{ content?: string }> }>(
+        await call(server, `/api/session/${session.id}/message`),
+      )
+      expect(after.data.map((message) => message.content)).toEqual(["one", "first"])
+    },
+  )
+})
+
+test("export and import round-trip a session over HTTP", async () => {
+  await withServer(
+    { script: [{ content: "remembered", usage: { inputTokens: 10, outputTokens: 5 } }] },
+    async ({ server }) => {
+      const created = await post(server, "/api/session", { title: "portable" })
+      const { data: session } = await json<{ data: { id: string } }>(created)
+      await post(server, `/api/session/${session.id}/prompt`, { text: "keep this" })
+      await waitFor(async () => ((await sessionStatus(server, session.id)) === "done" ? true : undefined))
+
+      const exported = await json<{ data: { session: { id: string }; messages: unknown[] } }>(
+        await call(server, `/api/session/${session.id}/export`),
+      )
+      expect(exported.data.messages).toHaveLength(2)
+      await call(server, `/api/session/${session.id}`, { method: "DELETE" })
+      expect((await call(server, `/api/session/${session.id}`)).status).toBe(404)
+
+      const imported = await post(server, "/api/session/import", exported.data)
+      expect(imported.status).toBe(201)
+      const restored = await json<{ data: Array<{ content?: string }> }>(
+        await call(server, `/api/session/${session.id}/message`),
+      )
+      expect(restored.data.map((message) => message.content)).toEqual(["keep this", "remembered"])
+
+      const again = await post(server, "/api/session/import", exported.data)
+      expect(again.status).toBe(200)
+      expect((await json<{ data: { imported: boolean } }>(again)).data.imported).toBe(false)
+    },
+  )
+})
+
+test("prompt during an active Turn is queued and applied at the next safe boundary", async () => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => (release = resolve))
+  const blocker: Tool = {
+    name: "blocker",
+    description: "blocks until released",
+    schema: { type: "object" },
+    readonly: true,
+    async execute() {
+      await gate
+      return { ok: true, output: "released" }
+    },
+  }
+  await withServer(
+    {
+      script: [
+        { toolCalls: [{ id: "b1", name: "blocker", input: {} }] },
+        { content: "first answer" },
+        { content: "steered answer" },
+      ],
+      tools: [blocker],
+    },
+    async ({ server }) => {
+      const created = await post(server, "/api/session", {})
+      const { data: session } = await json<{ data: { id: string } }>(created)
+      const first = await post(server, `/api/session/${session.id}/prompt`, { text: "start" })
+      expect(first.status).toBe(200)
+      await waitFor(async () => {
+        const res = await call(server, `/api/session/${session.id}/message`)
+        const body = await json<{ data: Array<{ role: string }> }>(res)
+        return body.data.some((message) => message.role === "assistant") ? true : undefined
+      })
+
+      const steered = await post(server, `/api/session/${session.id}/prompt`, { text: "actually do this" })
+      expect(steered.status).toBe(202)
+      release()
+      await waitFor(async () =>
+        ((await sessionStatus(server, session.id)) === "done" ? true : undefined),
+      )
+
+      const messages = await json<{ data: Array<{ role: string; content?: string; result?: { output: string } }> }>(
+        await call(server, `/api/session/${session.id}/message`),
+      )
+      expect(messages.data.map((message) => message.content) as unknown[]).toEqual([
+        "start",
+        null,
+        undefined,
+        "actually do this",
+        "first answer",
+      ])
+      expect(messages.data.some((message) => message.result?.output === "released")).toBe(true)
+    },
+  )
+})
+
+test("auto titles are generated from the first exchange", async () => {
+  await withServer(
+    {
+      script: [{ content: "The resume path now deduplicates messages." }],
+      title: [{ content: "Repair resume deduplication" }],
+    },
+    async ({ server }) => {
+      const created = await post(server, "/api/session", {})
+      const { data: session } = await json<{ data: { id: string; title: string } }>(created)
+      await post(server, `/api/session/${session.id}/prompt`, { text: "why do resumes duplicate messages?" })
+      await waitFor(async () => {
+        const res = await call(server, `/api/session/${session.id}`)
+        const body = await json<{ data: { title: string } }>(res)
+        return body.data.title === "Repair resume deduplication" ? true : undefined
+      })
+      const fetched = await json<{ data: { title: string } }>(await call(server, `/api/session/${session.id}`))
+      expect(fetched.data.title).toBe("Repair resume deduplication")
     },
   )
 })

@@ -292,7 +292,29 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
       )
     },
 
+    sessionImport: async ({ req }) => {
+      const result = service.importSession(await body(req))
+      return data(result, result.imported ? 201 : 200)
+    },
+
     session: ({ params }) => data(service.get(params.sessionID)),
+
+    sessionRevert: async ({ req, params }) => {
+      const input = await body(req)
+      const messageID = stringField(input, "messageID", false)
+      return data(service.revert(params.sessionID, messageID))
+    },
+
+    sessionFork: async ({ req, params }) => {
+      const input = await body(req)
+      const messageID = stringField(input, "messageID", false)
+      const title = stringField(input, "title", false)
+      return data(service.fork(params.sessionID, messageID, title), 201)
+    },
+
+    sessionExport: ({ params }) => data(service.exportSession(params.sessionID)),
+
+    sessionUsage: ({ params }) => data(service.usage(params.sessionID)),
 
     sessionUpdate: async ({ req, params }) => {
       const input = await body(req)
@@ -325,7 +347,7 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
         ...(autoApprove ? { autoApprove: true } : {}),
         ...(mode ? { mode } : {}),
       })
-      return data(result.message)
+      return data(result.message, result.queued ? 202 : 200)
     },
 
     interrupt: ({ params }) => {

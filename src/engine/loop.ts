@@ -63,6 +63,8 @@ export interface RunConfig {
   afterEdit?: (paths: string[]) => Promise<string[]>
   /** In unattended mode, refuse outside-cwd writes unless explicitly allowed. */
   workspaceBoundary?: boolean
+  /** Steer the Turn: read and remove user input queued while it was running. */
+  pendingInput?: () => Message[]
   depth?: number
   maxDepth?: number
 }
@@ -165,6 +167,15 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
   let limitHit = false
   const doomCounts = new Map<string, number>()
 
+  const queueInput = (): Message[] => {
+    if (!cfg.pendingInput) return []
+    try {
+      return cfg.pendingInput()
+    } catch {
+      return []
+    }
+  }
+
   try {
     while (true) {
       if (cfg.signal?.aborted) {
@@ -175,6 +186,18 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
       if (steps >= maxSteps) {
         limitHit = true
         break
+      }
+
+      // Steering arrives between provider calls, never mid-stream. Append it
+      // before the next request so the model sees the user's correction.
+      for (const message of queueInput()) {
+        working.push(message)
+        try {
+          store?.append(sessionId, message)
+        } catch {
+          /* the in-memory turn still sees it */
+        }
+        yield { type: "messageAdded", message, queued: true }
       }
 
       if (cfg.compactProvider) {
@@ -248,6 +271,20 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
       store?.append(sessionId, working[working.length - 1])
 
       if (calls.length === 0) {
+        const steering = queueInput()
+        if (steering.length > 0) {
+          for (const message of steering) {
+            working.push(message)
+            try {
+              store?.append(sessionId, message)
+            } catch {
+              /* the in-memory turn still sees it */
+            }
+            yield { type: "messageAdded", message, queued: true }
+          }
+          steps++
+          continue
+        }
         result = content ?? ""
         yield { type: "contextUpdate", used: budgetUsed(working, systemTokens), limit, pct: budgetPct(working, limit, systemTokens) }
         yield { type: "turnComplete", step: steps }

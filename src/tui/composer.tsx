@@ -22,16 +22,22 @@ export function Composer({
   historyLen?: number
   t: Theme
 }) {
+  const before = value.slice(0, cursor)
+  const after = value.slice(cursor)
+
   if (busy) {
     return (
-      <Box>
-        <Text color={t.boneDim}>running a Turn · Ctrl+C abort</Text>
+      <Box flexDirection="column">
+        <Text>
+          <Text color={t.gold}>{mode} › </Text>
+          <Text color={t.boneDim}>{before}</Text>
+          <Text color={t.gold}>█</Text>
+          <Text color={t.boneDim}>{after}</Text>
+        </Text>
+        <Text color={t.boneDim}>running a Turn · Enter queue steering · Ctrl+C abort</Text>
       </Box>
     )
   }
-
-  const before = value.slice(0, cursor)
-  const after = value.slice(cursor)
   const slashOpen = value.startsWith("/")
   const slashMatches = slashOpen ? filterSlashCommands(value) : []
 

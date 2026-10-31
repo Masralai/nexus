@@ -4,18 +4,21 @@ import type { Runtime } from "../cli/launch"
 import { runTurn } from "../cli/launch"
 import type { AgentMode } from "../engine/mode"
 import type { PermissionReply, PermissionRequest } from "../engine/permission"
+import type { SessionExport } from "../engine/session-io"
 import type { SQLiteStore } from "../engine/sqlite"
-import { sessionDisplayTitle } from "../engine/title"
+import { generateTitle, sessionDisplayTitle, titleFromMessages } from "../engine/title"
 import type {
   EngineEvent,
   ImagePart,
   Message,
   QuestionAnswer,
   QuestionPrompt,
+  SessionCounters,
   SessionMeta,
   SessionStatus,
   StoredEvent,
 } from "../engine/types"
+import { getModelInfo, type ModelInfo } from "../providers/catalog"
 import { badRequest, conflict, notFound } from "./errors"
 
 export interface WireEvent {
@@ -34,6 +37,8 @@ export interface SessionView extends SessionMeta {
   status: SessionStatus
   active: boolean
   title: string
+  usage: SessionCounters
+  modelInfo: ModelInfo
 }
 
 export interface CreateSessionInput {
@@ -53,6 +58,8 @@ export interface PromptInput {
 export interface PromptResult {
   sessionID: string
   message: Message
+  /** True when a Turn was active and the input was queued for steering. */
+  queued?: boolean
 }
 
 export type RuntimeFactory = (input: { cwd: string; model?: string; store: SQLiteStore }) => Runtime
@@ -90,7 +97,12 @@ interface PendingQuestion {
   claimed: boolean
 }
 
-type DurableInput = EngineEvent | { type: "messageAdded"; message: Message }
+type DurableInput =
+  | EngineEvent
+  | { type: "messageQueued"; message: Message }
+  | { type: "titleUpdated"; title: string }
+  | { type: "sessionReverted"; messageID?: string; removed: number }
+  | { type: "sessionForked"; parentID: string; messageID?: string }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void
@@ -174,10 +186,17 @@ export class SessionService {
     return this.view(loaded.meta, sessionDisplayTitle(loaded.meta, loaded.messages))
   }
 
-  messages(id: string, limit?: number): Message[] {
+  messages(id: string, limit?: number): Array<Message & { id: string }> {
     if (!this.store.has(id)) throw notFound(`session ${id} not found`)
-    const messages = this.store.load(id).messages
-    return limit && limit > 0 ? messages.slice(-limit) : messages
+    const messages = this.store.messageEntries(id)
+    const selected = limit && limit > 0 ? messages.slice(-limit) : messages
+    return selected.map((entry) => ({ ...entry.message, id: entry.id }))
+  }
+
+  usage(id: string): SessionCounters & { model: ModelInfo } {
+    if (!this.store.has(id)) throw notFound(`session ${id} not found`)
+    const meta = this.store.load(id).meta
+    return { ...this.store.counters(id), model: getModelInfo(meta.model) }
   }
 
   create(input: CreateSessionInput = {}): SessionView {
@@ -210,15 +229,66 @@ export class SessionService {
     this.store.delete(id)
   }
 
+  revert(id: string, messageID?: string): SessionView {
+    if (!this.store.has(id)) throw notFound(`session ${id} not found`)
+    if (this.active.has(id)) throw conflict("cannot revert a session with an active Turn")
+    const removed = this.store.revertTo(id, messageID)
+    if (removed === 0) {
+      if (messageID) throw notFound(`message ${messageID} not found in session ${id}`)
+      return this.get(id)
+    }
+    this.store.setStatus(id, "done")
+    this.persist(id, { type: "sessionReverted", ...(messageID ? { messageID } : {}), removed })
+    return this.get(id)
+  }
+
+  fork(id: string, messageID?: string, title?: string): SessionView {
+    if (!this.store.has(id)) throw notFound(`session ${id} not found`)
+    if (this.active.has(id)) throw conflict("cannot fork a session with an active Turn")
+    if (messageID && !this.store.messageEntries(id).some((entry) => entry.id === messageID)) {
+      throw notFound(`message ${messageID} not found in session ${id}`)
+    }
+    const meta: SessionMeta = this.store.fork(id, {
+      ...(messageID ? { boundary: messageID } : {}),
+      ...(title ? { title } : {}),
+    })
+    this.persist(meta.id, { type: "sessionForked", parentID: id, ...(messageID ? { messageID } : {}) })
+    return this.get(meta.id)
+  }
+
+  exportSession(id: string): SessionExport {
+    if (!this.store.has(id)) throw notFound(`session ${id} not found`)
+    return this.store.exportSession(id)
+  }
+
+  importSession(raw: unknown): { session: SessionView; imported: boolean } {
+    let result: ReturnType<SQLiteStore["importSession"]>
+    try {
+      result = this.store.importSession(raw)
+    } catch (error) {
+      throw badRequest(error instanceof Error ? error.message : String(error))
+    }
+    return { session: this.get(result.meta.id), imported: result.imported }
+  }
+
   prompt(id: string, input: PromptInput): PromptResult {
     if (!this.store.has(id)) throw notFound(`session ${id} not found`)
-    if (this.active.has(id)) throw conflict("session already has an active Turn")
     if (!input.text.trim()) throw badRequest("prompt text is required")
     const message: Message = {
       role: "user",
       content: input.text,
       ...(input.images?.length ? { images: input.images } : {}),
     }
+    if (this.active.has(id)) {
+      this.store.queuePending(id, "prompt", {
+        message,
+        ...(input.autoApprove ? { autoApprove: true } : {}),
+        ...(input.mode ? { mode: input.mode } : {}),
+      })
+      this.persist(id, { type: "messageQueued", message })
+      return { sessionID: id, message, queued: true }
+    }
+    this.flushPending(id)
     this.store.append(id, message)
     this.store.setStatus(id, "running")
     this.persist(id, { type: "messageAdded", message })
@@ -303,6 +373,8 @@ export class SessionService {
       status: loaded.status,
       active: this.active.has(meta.id),
       title,
+      usage: this.store.counters(meta.id),
+      modelInfo: getModelInfo(meta.model),
     }
   }
 
@@ -338,6 +410,7 @@ export class SessionService {
     } finally {
       this.clearPending(id)
     }
+    await this.maybeGenerateTitle(id)
   }
 
   private askPermission(
@@ -416,6 +489,34 @@ export class SessionService {
       if (pending.sessionID === sessionID) this.permissions.delete(key)
     }
     this.questions.delete(sessionID)
+  }
+
+  /** Apply input left queued by a Turn that aborted before its next boundary. */
+  private flushPending(sessionID: string): void {
+    for (const item of this.store.takePending(sessionID, "prompt")) {
+      const message = (item.data as { message?: Message }).message
+      if (!message || message.role !== "user") continue
+      this.store.append(sessionID, message)
+      this.persist(sessionID, { type: "messageAdded", message, queued: true })
+    }
+  }
+
+  private async maybeGenerateTitle(sessionID: string): Promise<void> {
+    const loaded = this.store.load(sessionID)
+    const runtime = this.runtime(loaded.meta.cwd, loaded.meta.model)
+    const provider = runtime.titleProvider
+    if (!provider || runtime.cfg.autoTitle === false) return
+    const heuristic = titleFromMessages(loaded.messages)
+    if (!heuristic || loaded.meta.title !== heuristic) return
+    if (!loaded.messages.some((message) => message.role === "assistant" && message.content)) return
+    try {
+      const title = await generateTitle(provider, loaded.messages)
+      if (!title || title === loaded.meta.title) return
+      this.store.rename(sessionID, title)
+      this.persist(sessionID, { type: "titleUpdated", title })
+    } catch {
+      // A title is cosmetic; never fail a completed Turn for it.
+    }
   }
 
   private persist(sessionID: string, event: DurableInput): WireEvent {

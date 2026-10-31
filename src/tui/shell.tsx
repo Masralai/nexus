@@ -647,7 +647,54 @@ export function Shell() {
       return
     }
 
-    if (busy) return
+    // Steering: Enter during a Turn queues the line for the next safe boundary.
+    if (busy && key.return) {
+      const line = chrome.input.trim()
+      if (!line) return
+      setChrome((c) => reduceChrome(c, { type: "commitUser" }))
+      if (line.startsWith("/")) {
+        pushLog("slash commands are unavailable during a Turn — queued as steering instead")
+      }
+      try {
+        const message: Message = { role: "user", content: line }
+        store.queuePending(sessionId, "prompt", { message })
+        setMessages((current) => [...current, message])
+      } catch {
+        pushLog("could not queue steering input")
+        return
+      }
+      try {
+        appendHistory(line)
+      } catch {
+        /* history persist is best-effort */
+      }
+      pushLog("queued — applied at the next step")
+      return
+    }
+
+    if (busy) {
+      // Editing stays live during a Turn so the next line can be queued.
+      if (key.backspace) {
+        setChrome((c) => reduceChrome(c, { type: "backspace" }))
+        return
+      }
+      if (key.delete) {
+        setChrome((c) => reduceChrome(c, { type: "delete" }))
+        return
+      }
+      if (key.leftArrow) {
+        setChrome((c) => reduceChrome(c, { type: "left" }))
+        return
+      }
+      if (key.rightArrow) {
+        setChrome((c) => reduceChrome(c, { type: "right" }))
+        return
+      }
+      if (key.ctrl || key.meta) return
+      if (ch.startsWith("\x1b") || ch.startsWith("[<")) return
+      if (ch) setChrome((c) => reduceChrome(c, { type: "insert", ch }))
+      return
+    }
 
     if (slashOpen && slashMatches.length > 0) {
       if (key.upArrow) {

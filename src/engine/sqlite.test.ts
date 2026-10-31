@@ -103,6 +103,85 @@ test("sqlite lists sessions newest first", () => {
   }
 })
 
+test("message entries expose stable ids in append order", () => {
+  const db = store()
+  try {
+    db.create(meta, history)
+    const entries = db.messageEntries("s1")
+    expect(entries).toHaveLength(history.length)
+    expect(entries.every((entry) => entry.id.startsWith("msg_"))).toBe(true)
+    expect(entries[0].message).toEqual(history[0])
+    // Ids are stable across loads.
+    expect(db.messageEntries("s1").map((entry) => entry.id)).toEqual(entries.map((entry) => entry.id))
+  } finally {
+    db.close()
+  }
+})
+
+test("revertTo removes the boundary message and everything after it", () => {
+  const db = store()
+  try {
+    db.create(meta, history)
+    const entries = db.messageEntries("s1")
+    const removed = db.revertTo("s1", entries[1].id)
+    expect(removed).toBeGreaterThan(0)
+    expect(db.load("s1").messages).toEqual(history.slice(0, 1))
+    // The remaining messages still satisfy tool-call pairing.
+    const remaining = db.load("s1").messages
+    expect(() =>
+      db.append("s1", {
+        role: "tool",
+        toolCallId: "c1",
+        name: "read",
+        result: { ok: true, output: "again" },
+      }),
+    ).toThrow(/orphan tool result/)
+    expect(remaining).toHaveLength(1)
+  } finally {
+    db.close()
+  }
+})
+
+test("fork copies history before a boundary and records lineage", () => {
+  const db = store()
+  try {
+    db.create(meta, history)
+    const entries = db.messageEntries("s1")
+    const fork = db.fork("s1", { boundary: entries[3].id })
+    expect(fork.parentId).toBe("s1")
+    expect(fork.forkBoundary).toBe(entries[3].id)
+    expect(fork.title).toContain("(fork)")
+    expect(db.load(fork.id).messages).toEqual(history.slice(0, 3))
+    expect(db.load(fork.id).status).toBe("done")
+  } finally {
+    db.close()
+  }
+})
+
+test("export and import round-trip messages and counters", () => {
+  const db = store()
+  try {
+    db.create(meta, history)
+    db.setStatus("s1", "done")
+    db.addUsage("s1", { inputTokens: 100, outputTokens: 20, cacheReadTokens: 10 }, 0.25)
+    const doc = db.exportSession("s1")
+    expect(doc.messages).toHaveLength(history.length)
+    expect(doc.counters).toMatchObject({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 10 })
+
+    db.delete("s1")
+    const restored = db.importSession(doc)
+    expect(restored.imported).toBe(true)
+    expect(db.load("s1").messages).toEqual(history)
+    expect(db.load("s1").status).toBe("done")
+    expect(db.counters("s1")).toEqual(doc.counters)
+
+    expect(db.importSession(doc).imported).toBe(false)
+    expect(db.count()).toBe(1)
+  } finally {
+    db.close()
+  }
+})
+
 test("legacy JSONL import is lossless and idempotent", () => {
   const legacyDir = mkdtempSync(join(tmpdir(), "nexus-legacy-"))
   const legacy = new JSONLStore(legacyDir)

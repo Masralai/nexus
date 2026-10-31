@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { defaultLegacySessionsDir, openSessionStore } from "../engine/store"
+import { exportSession, forkSession, importSession, revertSession } from "./session"
 import { parseServeFlags, runServe } from "./serve"
 import { runService } from "./service"
 import { makeProvider, parseFlags, runSession, selfTest } from "./run"
@@ -51,6 +52,18 @@ switch (cmd) {
     store.close()
     break
   }
+  case "export":
+    process.exit(exportSession(argv.slice(1)))
+    break
+  case "import":
+    process.exit(importSession(argv.slice(1)))
+    break
+  case "revert":
+    process.exit(revertSession(argv.slice(1)))
+    break
+  case "fork":
+    process.exit(forkSession(argv.slice(1)))
+    break
   case "self-test": {
     const { model } = parseFlags(argv.slice(1))
     const { provider } = makeProvider(model)
@@ -72,6 +85,10 @@ switch (cmd) {
        nexus resume <id> [--model <m>] [--yes] [--format ndjson] [--attach]
        nexus serve [--port N] [--hostname H] [--token T]
        nexus service start|stop|status|token
+       nexus export <id> [--format json|markdown] [--out <file>]
+       nexus import <export.json>
+       nexus revert <id> [--at <message-id>]
+       nexus fork <id> [--at <message-id>] [--title <title>]
        nexus migrate [jsonl-dir]         # one-time legacy import
        nexus self-test [--model <m>]
        nexus --help

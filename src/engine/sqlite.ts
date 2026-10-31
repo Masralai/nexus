@@ -6,6 +6,7 @@ import { desc, eq } from "drizzle-orm"
 import { drizzle } from "drizzle-orm/bun-sqlite"
 import { MIGRATIONS } from "./migrations"
 import * as schema from "./schema"
+import { parseSessionExport, type SessionExport } from "./session-io"
 import { JSONLStore } from "./state"
 import { sessionDisplayTitle, sessionTitle, titleFromText } from "./title"
 import type {
@@ -177,29 +178,37 @@ export class SQLiteStore implements SessionStore {
       .run(status, new Date().toISOString(), id)
   }
 
-  load(id: string): LoadedSession {
-    const row = this.db.select().from(schema.sessions).where(eq(schema.sessions.id, id)).get()
-    if (!row) throw new Error(`session ${id}: not found`)
-    const rows = this.sqlite
+  private partRows(id: string): PartRow[] {
+    return this.sqlite
       .query(
         "SELECT message_id, part_type, role, data, message_json FROM session_parts WHERE session_id = ? ORDER BY seq",
       )
       .all(id) as PartRow[]
+  }
+
+  /** Durable messages paired with their stable message id, in append order. */
+  messageEntries(id: string): Array<{ id: string; message: Message }> {
     const groups = new Map<string, PartRow[]>()
-    for (const part of rows) {
+    for (const part of this.partRows(id)) {
       const group = groups.get(part.message_id)
       if (group) group.push(part)
       else groups.set(part.message_id, [part])
     }
-    const messages: Message[] = []
-    for (const group of groups.values()) {
+    const entries: Array<{ id: string; message: Message }> = []
+    for (const [messageId, group] of groups) {
       const message = messageFromParts(group)
-      if (message) messages.push(message)
+      if (message) entries.push({ id: messageId, message })
     }
+    return entries
+  }
+
+  load(id: string): LoadedSession {
+    const row = this.db.select().from(schema.sessions).where(eq(schema.sessions.id, id)).get()
+    if (!row) throw new Error(`session ${id}: not found`)
     return {
       meta: toMeta(row),
       status: (row.status as SessionStatus) ?? "running",
-      messages,
+      messages: this.messageEntries(id).map((entry) => entry.message),
     }
   }
 
@@ -507,6 +516,25 @@ export class SQLiteStore implements SessionStore {
     this.sqlite.query("DELETE FROM session_pending WHERE id = ?").run(id)
   }
 
+  /** Atomically read and remove queued input so one Turn step owns each item. */
+  takePending(sessionId: string, kind?: string): Array<{ id: string; kind: string; data: unknown; createdAt: string }> {
+    return this.sqlite.transaction(() => {
+      const rows = (
+        kind
+          ? this.sqlite
+              .query("SELECT * FROM session_pending WHERE session_id = ? AND kind = ? ORDER BY created_at")
+              .all(sessionId, kind)
+          : this.sqlite.query("SELECT * FROM session_pending WHERE session_id = ? ORDER BY created_at").all(sessionId)
+      ) as Array<{ id: string; kind: string; data: string; created_at: string }>
+      if (rows.length === 0) return []
+      const ids = rows.map((row) => row.id)
+      this.sqlite
+        .query(`DELETE FROM session_pending WHERE id IN (${ids.map(() => "?").join(",")})`)
+        .run(...ids)
+      return rows.map((r) => ({ id: r.id, kind: r.kind, data: JSON.parse(r.data), createdAt: r.created_at }))
+    })()
+  }
+
   addInbox(sessionId: string, data: Record<string, unknown>): InboxItem {
     const id = `inbox_${randomUUID()}`
     const createdAt = new Date().toISOString()
@@ -695,6 +723,89 @@ export class SQLiteStore implements SessionStore {
       return count.n
     })()
     return removed
+  }
+
+  /** Messages before a durable boundary (exclusive). Without a boundary, all messages. */
+  messagesBefore(sessionId: string, boundary?: string): Message[] {
+    const entries = this.messageEntries(sessionId)
+    if (!boundary) return entries.map((entry) => entry.message)
+    const index = entries.findIndex((entry) => entry.id === boundary)
+    if (index < 0) throw new Error(`session ${sessionId}: message ${boundary} not found`)
+    return entries.slice(0, index).map((entry) => entry.message)
+  }
+
+  /**
+   * Branch a Session. The fork keeps everything before `boundary` (exclusive),
+   * or the whole history when no boundary is given, and records lineage.
+   */
+  fork(sourceId: string, opts: { boundary?: string; title?: string } = {}): SessionMeta {
+    const source = this.load(sourceId)
+    const messages = this.messagesBefore(sourceId, opts.boundary)
+    const id = `ses_${randomUUID()}`
+    const now = new Date().toISOString()
+    const title =
+      opts.title ??
+      `${sessionDisplayTitle({ id: sourceId, title: source.meta.title }, source.messages)} (fork)`
+    const meta: SessionMeta = {
+      id,
+      cwd: source.meta.cwd,
+      model: source.meta.model,
+      provider: source.meta.provider,
+      createdAt: now,
+      parentId: sourceId,
+      ...(opts.boundary ? { forkBoundary: opts.boundary } : {}),
+      title,
+    }
+    this.create(meta, messages)
+    this.setStatus(id, "done")
+    return meta
+  }
+
+  exportSession(id: string): SessionExport {
+    const loaded = this.load(id)
+    return {
+      schemaVersion: 1,
+      session: loaded.meta,
+      status: loaded.status,
+      counters: this.counters(id),
+      messages: this.messageEntries(id).map((entry) => ({ id: entry.id, message: entry.message })),
+    }
+  }
+
+  /**
+   * Import a previously exported Session. Existing ids are left untouched so
+   * imports are idempotent and never overwrite local history.
+   */
+  importSession(raw: unknown): { meta: SessionMeta; status: SessionStatus; imported: boolean } {
+    const doc = parseSessionExport(raw)
+    if (this.has(doc.session.id)) return { meta: doc.session, status: doc.status, imported: false }
+    const messages = doc.messages.map((entry) => entry.message)
+    const title = doc.session.title ?? (sessionTitle(messages) || undefined)
+    this.create({ ...doc.session, ...(title ? { title } : {}) }, messages)
+    if (doc.status !== "running") this.setStatus(doc.session.id, doc.status)
+    this.restoreCounters(doc.session.id, doc.counters)
+    return { meta: doc.session, status: doc.status, imported: true }
+  }
+
+  /** Restore exported counters exactly, rather than adding them again. */
+  restoreCounters(id: string, counters: SessionCounters): void {
+    this.sqlite
+      .query(
+        `UPDATE sessions SET
+           input_tokens = ?, output_tokens = ?, reasoning_tokens = ?,
+           cache_read_tokens = ?, cache_write_tokens = ?, cost = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        counters.inputTokens,
+        counters.outputTokens,
+        counters.reasoningTokens,
+        counters.cacheReadTokens,
+        counters.cacheWriteTokens,
+        Math.round(counters.cost * 1_000_000),
+        new Date().toISOString(),
+        id,
+      )
   }
 
   createJob(job: {
