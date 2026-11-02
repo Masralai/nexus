@@ -30,7 +30,13 @@ async function collect(iter: AsyncIterable<EngineEvent>): Promise<EngineEvent[]>
 test("stops when model returns no tool call", async () => {
   const provider = new MockProvider([{ content: "hello world" }])
   const evts = await collect(run([{ role: "user", content: "hi" }], cfg({ provider })))
-  expect(evts.map((e) => e.type)).toEqual(["tokenDelta", "contextUpdate", "turnComplete", "runComplete"])
+  expect(evts.map((e) => e.type)).toEqual([
+    "tokenDelta",
+    "usage",
+    "contextUpdate",
+    "turnComplete",
+    "runComplete",
+  ])
   expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 0, result: "hello world" })
 })
 
@@ -48,11 +54,13 @@ test("executes tool call then completes", async () => {
   )
   expect(evts.map((e) => e.type)).toEqual([
     "toolCallStarted",
+    "usage",
     "permissionRequest",
     "toolResult",
     "contextUpdate",
     "turnComplete",
     "tokenDelta",
+    "usage",
     "contextUpdate",
     "turnComplete",
     "runComplete",
@@ -658,6 +666,17 @@ test("emits usage from the provider", async () => {
     usage: { inputTokens: 12, outputTokens: 3, cacheReadTokens: 4 },
     cost: 0,
   })
+})
+
+test("estimates usage when the provider omits it", async () => {
+  const provider = new MockProvider([{ content: "four" }])
+  const evts = await collect(run([{ role: "user", content: "prompt" }], cfg({ provider })))
+  const usage = evts.find((e) => e.type === "usage")
+  expect(usage).toMatchObject({ type: "usage", estimated: true })
+  if (usage?.type !== "usage") throw new Error("missing usage")
+  expect(usage.usage.inputTokens).toBeGreaterThan(0)
+  expect(usage.usage.outputTokens).toBe(1)
+  expect(usage.usage.cacheReadTokens).toBe(0)
 })
 
 test("maxSteps marks the session as limit, never silent success", async () => {

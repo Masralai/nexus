@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import type { Provider, Usage } from "../providers/types"
 import { estimateCost, getModelInfo } from "../providers/catalog"
-import { approxTextTokens, buildPrompt, budgetPct, budgetUsed, maybeCompact } from "./context"
+import { approxTextTokens, buildPrompt, budgetPct, budgetUsed, maybeCompact, type BuiltPrompt } from "./context"
 import { advertiseTools, modePolicy, isReadonlyTool, type AgentMode } from "./mode"
 import {
   decide,
@@ -108,6 +108,22 @@ function unpersisted(caller: readonly Message[], persisted: readonly Message[]):
 function isAbort(e: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) return true
   return e instanceof Error && (e.name === "AbortError" || /aborted/i.test(e.message))
+}
+
+/**
+ * Documented fallback when a provider omits usage: the same conservative
+ * four-characters-per-token estimate the context budget uses. It counts the
+ * full prompt (system plus messages) as input and the streamed answer as
+ * output; cache and reasoning tokens are unknown and stay zero.
+ */
+function estimatedUsage(prompt: BuiltPrompt, content: string | null): Usage {
+  return {
+    inputTokens: budgetUsed(prompt.messages, approxTextTokens(prompt.system)),
+    outputTokens: approxTextTokens(content ?? ""),
+    reasoningTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  }
 }
 
 export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncIterable<EngineEvent> {
@@ -250,16 +266,14 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
         }
       }
 
-      if (stepUsage) {
-        const cost = estimateCost(getModelInfo(model), stepUsage)
-        const durable = store as SessionStore & { addUsage?: (id: string, usage: Usage, cost: number) => void }
-        try {
-          durable?.addUsage?.(sessionId, stepUsage, cost)
-        } catch {
-          /* accounting must never fail a turn */
-        }
-        yield { type: "usage", usage: stepUsage, cost }
+      const usage = stepUsage ?? estimatedUsage(prompt, content)
+      const cost = estimateCost(getModelInfo(model), usage)
+      try {
+        store?.addUsage?.(sessionId, usage, cost)
+      } catch {
+        /* accounting must never fail a turn */
       }
+      yield { type: "usage", usage, cost, ...(stepUsage ? {} : { estimated: true }) }
 
       if (cfg.signal?.aborted) {
         store?.setStatus(sessionId, "aborted")
