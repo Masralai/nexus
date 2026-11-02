@@ -113,8 +113,7 @@ export class SQLiteStore implements SessionStore {
     }
   }
 
-  private insert(id: string, msg: Message): void {
-    const messageId = sortableMessageId()
+  private insert(id: string, msg: Message, messageId = sortableMessageId()): void {
     const parts = partsForMessage(msg)
     const json = JSON.stringify(msg)
     const now = new Date().toISOString()
@@ -141,7 +140,8 @@ export class SQLiteStore implements SessionStore {
     })()
   }
 
-  create(meta: SessionMeta, messages: Message[] = []): void {
+  /** Create a Session. `ids` preserves durable message ids on import. */
+  create(meta: SessionMeta, messages: Message[] = [], ids?: Array<string | undefined>): void {
     this.db
       .insert(schema.sessions)
       .values({
@@ -157,19 +157,32 @@ export class SQLiteStore implements SessionStore {
         updatedAt: meta.createdAt,
       })
       .run()
-    for (const msg of messages) this.append(meta.id, msg)
+    messages.forEach((msg, index) => {
+      const messageId = ids?.[index]
+      if (messageId) this.appendWithId(meta.id, msg, messageId)
+      else this.append(meta.id, msg)
+    })
   }
 
   append(id: string, msg: Message): void {
-    if (msg.role === "tool") {
-      const owner = this.sqlite
-        .query(
-          "SELECT 1 AS one FROM session_parts WHERE session_id = ? AND part_type = 'tool_call' AND json_extract(data, '$.id') = ? LIMIT 1",
-        )
-        .get(id, msg.toolCallId)
-      if (!owner) throw new Error(`session ${id}: orphan tool result ${msg.toolCallId}`)
-    }
+    this.ensureToolCallOwner(id, msg)
     this.insert(id, msg)
+  }
+
+  /** Append while preserving the durable message id, as imports do. */
+  appendWithId(id: string, msg: Message, messageId: string): void {
+    this.ensureToolCallOwner(id, msg)
+    this.insert(id, msg, messageId)
+  }
+
+  private ensureToolCallOwner(id: string, msg: Message): void {
+    if (msg.role !== "tool") return
+    const owner = this.sqlite
+      .query(
+        "SELECT 1 AS one FROM session_parts WHERE session_id = ? AND part_type = 'tool_call' AND json_extract(data, '$.id') = ? LIMIT 1",
+      )
+      .get(id, msg.toolCallId)
+    if (!owner) throw new Error(`session ${id}: orphan tool result ${msg.toolCallId}`)
   }
 
   setStatus(id: string, status: SessionStatus): void {
@@ -695,13 +708,43 @@ export class SQLiteStore implements SessionStore {
     this.sqlite.query("DELETE FROM worktrees WHERE directory = ?").run(directory)
   }
 
-  /** Remove the given message and everything after it. Returns removed part count. */
+  /**
+   * Move a boundary back to its owning assistant message when it points at a
+   * tool result, so a revert or fork never leaves an unpaired tool call.
+   */
+  private pairingBoundary(sessionId: string, messageId: string): string {
+    const row = this.sqlite
+      .query("SELECT role, data FROM session_parts WHERE session_id = ? AND message_id = ? ORDER BY seq LIMIT 1")
+      .get(sessionId, messageId) as { role: string | null; data: string } | null
+    if (!row) throw new Error(`session ${sessionId}: message ${messageId} not found`)
+    if (row.role !== "tool") return messageId
+    const data = JSON.parse(row.data) as { toolCallId?: unknown }
+    if (typeof data.toolCallId !== "string") {
+      throw new Error(`session ${sessionId}: tool message ${messageId} has no toolCallId`)
+    }
+    const owner = this.sqlite
+      .query(
+        `SELECT message_id FROM session_parts
+         WHERE session_id = ? AND part_type = 'tool_call' AND json_extract(data, '$.id') = ?
+         ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(sessionId, data.toolCallId) as { message_id: string } | null
+    if (!owner) throw new Error(`session ${sessionId}: orphan tool result ${data.toolCallId}`)
+    return owner.message_id
+  }
+
+  /**
+   * Remove the given message and everything after it. Returns removed part count.
+   * Usage counters are cumulative provider spend and intentionally are not
+   * refunded: reverting history does not unspend tokens.
+   */
   revertTo(sessionId: string, messageId?: string): number {
     let boundary: number | undefined
     if (messageId) {
+      const resolved = this.pairingBoundary(sessionId, messageId)
       const row = this.sqlite
         .query("SELECT MIN(seq) AS seq FROM session_parts WHERE session_id = ? AND message_id = ?")
-        .get(sessionId, messageId) as { seq: number | null } | null
+        .get(sessionId, resolved) as { seq: number | null } | null
       boundary = row?.seq ?? undefined
     } else {
       const row = this.sqlite

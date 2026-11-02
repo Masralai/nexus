@@ -261,6 +261,14 @@ export interface LoadedSession {
   messages: Message[]
 }
 
+/** One item of durable input queued while a Turn is running. */
+export interface PendingInput {
+  id: string
+  kind: string
+  data: unknown
+  createdAt: string
+}
+
 export interface SessionStore {
   create(meta: SessionMeta, messages?: Message[]): void
   append(id: string, msg: Message): void
@@ -268,6 +276,12 @@ export interface SessionStore {
   load(id: string): LoadedSession
   list(): SessionMeta[]
   listWithTitles(): Array<{ meta: SessionMeta; title: string }>
+  /** Durably rename a Session. Optional for read-only stores. */
+  rename?(id: string, title: string): void
+  /** Add provider-reported or estimated usage. Optional for read-only stores. */
+  addUsage?(id: string, usage: Usage, cost?: number): void
+  /** Atomically read and remove Steering queued for the next provider boundary. */
+  takePending?(sessionId: string, kind?: string): PendingInput[]
 }
 
 export type EngineEvent =
@@ -278,7 +292,7 @@ export type EngineEvent =
   | { type: "permissionRequest"; id: string; name: string; input: unknown; reason: string }
   | { type: "questionRequest"; id: string; questions: QuestionPrompt[] }
   | { type: "contextUpdate"; used: number; limit: number; pct: number }
-  | { type: "usage"; usage: Usage; cost?: number }
+  | { type: "usage"; usage: Usage; cost?: number; estimated?: boolean }
   | { type: "turnComplete"; step: number }
   | { type: "stepLimit"; steps: number }
   | { type: "runComplete"; steps: number; result: string; reason?: "complete" | "step_limit" }
