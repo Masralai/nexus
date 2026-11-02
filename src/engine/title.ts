@@ -8,13 +8,18 @@ export function titleFromText(text: string): string | undefined {
   return line.length > 200 ? `${line.slice(0, 200)}…` : line
 }
 
-/** First non-synthetic user line, capped for pickers and session titles. */
-export function titleFromMessages(messages: readonly Message[]): string | undefined {
-  const firstUser = messages.find(
+/** First real user message: synthetic compaction summaries do not count. */
+function firstUser(messages: readonly Message[]): Extract<Message, { role: "user" }> | undefined {
+  return messages.find(
     (m): m is Extract<Message, { role: "user" }> =>
       m.role === "user" && m.synthetic !== "compaction" && m.content.trim().length > 0,
   )
-  return firstUser ? titleFromText(firstUser.content) : undefined
+}
+
+/** First non-synthetic user line, capped for pickers and session titles. */
+export function titleFromMessages(messages: readonly Message[]): string | undefined {
+  const user = firstUser(messages)
+  return user ? titleFromText(user.content) : undefined
 }
 
 export function sessionTitle(messages: readonly Message[]): string {
