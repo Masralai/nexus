@@ -70,6 +70,129 @@ export class NexusClient {
     return this.request<Record<string, unknown>>("config")
   }
 
+  location(directory?: string) {
+    return this.request<Record<string, unknown>>("location", {}, { query: { directory } })
+  }
+
+  reloadLocation() {
+    return this.request<void>("locationReload", {}, { method: "POST" })
+  }
+
+  debugLocations() {
+    return this.request<Array<{ directory: string; model?: string }>>("debugLocations")
+  }
+
+  evictLocation(directory: string, model?: string) {
+    return this.request<void>("debugEvict", {}, { method: "DELETE", query: { directory, model } })
+  }
+
+  fsList(path?: string, directory?: string) {
+    return this.request<Array<{ path: string; type: string }>>("fsList", {}, { query: { path, directory } })
+  }
+
+  async fsRead(path: string, directory?: string): Promise<string> {
+    const url = new URL(this.url + routePath("fsRead", { "*": path }))
+    if (directory) url.searchParams.set("directory", directory)
+    const res = await this.fetchImpl(url, { headers: { authorization: `Bearer ${this.token}` } })
+    if (!res.ok) {
+      const parsed = (await res.json().catch(() => ({}))) as { error?: { code: string; message: string } }
+      throw new NexusApiError(res.status, parsed.error?.code ?? "internal", parsed.error?.message ?? res.statusText)
+    }
+    return res.text()
+  }
+
+  fsFind(query: string, opts: { type?: "file" | "directory"; limit?: number; directory?: string } = {}) {
+    return this.request<Array<{ path: string; type: string }>>("fsFind", {}, { query: { query, ...opts } })
+  }
+
+  fsWrite(path: string, content: string, directory?: string) {
+    return this.request<{ path: string }>(
+      "fsWrite",
+      {},
+      { body: content, headers: { "content-type": "text/plain" }, query: { path, directory } },
+    )
+  }
+
+  mcpServers(directory?: string) {
+    return this.request<Array<Record<string, unknown>>>("mcpList", {}, { query: { directory } })
+  }
+
+  mcpAdd(server: string, config: Record<string, unknown>, directory?: string) {
+    return this.request<void>(
+      "mcpAdd",
+      { server },
+      { body: JSON.stringify({ config }), query: { directory } },
+    )
+  }
+
+  mcpRemove(server: string, directory?: string) {
+    return this.request<void>("mcpRemove", { server }, { query: { directory } })
+  }
+
+  mcpConnect(server: string, directory?: string) {
+    return this.request<void>("mcpConnect", { server }, { method: "POST", query: { directory } })
+  }
+
+  mcpDisconnect(server: string, directory?: string) {
+    return this.request<void>("mcpDisconnect", { server }, { method: "POST", query: { directory } })
+  }
+
+  mcpResources(directory?: string) {
+    return this.request<Record<string, unknown>>("mcpResources", {}, { query: { directory } })
+  }
+
+  ptyList(directory?: string) {
+    return this.request<Array<Record<string, unknown>>>("ptyList", {}, { query: { directory } })
+  }
+
+  ptyCreate(body: Record<string, unknown> = {}, directory?: string) {
+    return this.request<Record<string, unknown>>("ptyCreate", {}, { body: JSON.stringify(body), query: { directory } })
+  }
+
+  ptyGet(ptyID: string, directory?: string) {
+    return this.request<Record<string, unknown>>("ptyGet", { ptyID }, { query: { directory } })
+  }
+
+  ptyUpdate(ptyID: string, body: Record<string, unknown>, directory?: string) {
+    return this.request<Record<string, unknown>>("ptyUpdate", { ptyID }, { method: "PUT", body: JSON.stringify(body), query: { directory } })
+  }
+
+  ptyRemove(ptyID: string, directory?: string) {
+    return this.request<void>("ptyRemove", { ptyID }, { query: { directory } })
+  }
+
+  ptyInput(ptyID: string, data: string) {
+    return this.request<void>("ptyInput", { ptyID }, { body: JSON.stringify({ data }) })
+  }
+
+  ptyOutput(ptyID: string, offset?: number, directory?: string) {
+    return this.request<{ data: string; offset: number }>("ptyOutput", { ptyID }, { query: { offset, directory } })
+  }
+
+  pluginList() {
+    return this.request<Array<Record<string, unknown>>>("pluginList")
+  }
+
+  projectList() {
+    return this.request<Array<Record<string, unknown>>>("projectList")
+  }
+
+  projectUpdate(projectID: string, patch: Record<string, unknown>) {
+    return this.request<Record<string, unknown>>("projectUpdate", { projectID }, { body: JSON.stringify(patch) })
+  }
+
+  referenceList(directory?: string) {
+    return this.request<Array<Record<string, unknown>>>("referenceList", {}, { query: { directory } })
+  }
+
+  formList(directory?: string) {
+    return this.request<Array<Record<string, unknown>>>("formList", {}, { query: { directory } })
+  }
+
+  generate(prompt: string, model?: string) {
+    return this.request<{ text: string }>("generate", {}, { body: JSON.stringify({ prompt, model }) })
+  }
+
   listSessions(query?: string, limit?: number) {
     return this.request<unknown[]>("sessions", {}, { query: { search: query, limit } })
   }
