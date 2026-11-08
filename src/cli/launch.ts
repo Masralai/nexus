@@ -21,6 +21,7 @@ import { EventBus } from "../engine/bus"
 import { loadPlugins } from "../plugins/load"
 import { PluginRegistry } from "../plugins/hooks"
 import { createProvider } from "../providers"
+import { getModelInfo } from "../providers/catalog"
 import type { Provider } from "../providers/types"
 import type { Skill } from "../skills"
 import { defaultTools } from "../tools"
@@ -47,6 +48,10 @@ export interface Runtime {
   cfg: NexusConfig
   provider: Provider
   compactProvider: Provider
+  /** Cheap provider for generated Session titles; falls back to compactModel. */
+  titleProvider?: Provider
+  /** Stateless one-shot generation can ask for a different model in the same provider family. */
+  providerFor?: (model?: string) => Provider
   registry: Map<string, Tool>
   store: SessionStore
   bus?: EventBus<EngineEvent>
@@ -89,6 +94,20 @@ function snapshotStore(store: SessionStore): SnapshotStore | undefined {
   return typeof candidate.saveSnapshot === "function" && typeof candidate.getSnapshot === "function"
     ? (candidate as SnapshotStore)
     : undefined
+}
+
+interface PendingStore {
+  takePending(sessionId: string, kind?: string): Array<{ kind: string; data: unknown }>
+}
+
+/** Queued user input for steering, read atomically between provider calls. */
+function pendingInput(store: SessionStore, sessionId: string): Message[] {
+  const candidate = store as unknown as Partial<PendingStore>
+  if (typeof candidate.takePending !== "function") return []
+  return candidate
+    .takePending(sessionId, "prompt")
+    .map((item) => (item.data as { message?: Message }).message)
+    .filter((message): message is Message => message?.role === "user")
 }
 
 /** Resolve the tools that make up a default registry. */
@@ -147,10 +166,9 @@ export function launchRuntime(opts: LaunchOpts = {}): Runtime {
   return {
     cfg,
     provider: createProvider({ ...common, model: cfg.model }),
-    compactProvider: createProvider({
-      ...common,
-      model: cfg.compactModel || defaultCompactModel(cfg.preset, cfg.provider, cfg.model),
-    }),
+    compactProvider: createProvider({ ...common, model: compactModel }),
+    titleProvider: createProvider({ ...common, model: cfg.titleModel || compactModel }),
+    providerFor: (model) => createProvider({ ...common, model: model || cfg.model }),
     registry,
     store,
     bus: new EventBus<EngineEvent>(),
@@ -229,6 +247,13 @@ export async function* runTurn(opts: TurnOpts): AsyncIterable<EngineEvent> {
   const sessionId = opts.sessionId ?? randomUUID()
   const pluginCtx = { cwd, sessionId }
   await rt.ready?.()
+  const model = opts.model ?? (rt.cfg.model || "(default)")
+  if (opts.messages.some((message) => "images" in message && message.images?.length)) {
+    const info = getModelInfo(model)
+    if (info.id !== "unknown" && !info.vision) {
+      throw new Error(`model ${model} does not support image input`)
+    }
+  }
   const providerParams = rt.plugins?.chatParams({}, pluginCtx)
 
   const perms = permissionStore(rt.store)
@@ -282,7 +307,7 @@ export async function* runTurn(opts: TurnOpts): AsyncIterable<EngineEvent> {
     provider: rt.provider,
     registry: rt.registry,
     cwd,
-    model: opts.model ?? (rt.cfg.model || "(default)"),
+    model,
     maxSteps: opts.maxSteps ?? rt.cfg.maxSteps,
     store: rt.store,
     sessionId,
@@ -339,8 +364,9 @@ export async function* runTurn(opts: TurnOpts): AsyncIterable<EngineEvent> {
     try {
       await maybeGenerateTitle(rt.store, sessionId, rt.titleProvider, {
         disabled: rt.cfg.autoTitle === false,
-        model: rt.titleModel,
+        model: rt.cfg.titleModel || rt.cfg.compactModel,
         signal: opts.signal,
+        params: providerParams,
       })
     } catch {
       // A title is cosmetic; never fail a completed Turn for it.

@@ -53,6 +53,7 @@ test("presets cover curated providers", () => {
     "anthropic",
     "openai",
     "gemini",
+    "azure",
     "openrouter",
     "groq",
     "deepseek",
@@ -64,7 +65,9 @@ test("presets cover curated providers", () => {
   expect(getPreset("anthropic")?.adapter).toBe("anthropic")
   expect(getPreset("openrouter")?.baseUrl).toContain("openrouter")
   expect(getPreset("gemini")?.baseUrl).toContain("generativelanguage.googleapis.com")
+  expect(getPreset("gemini")?.adapter).toBe("gemini")
   expect(getPreset("gemini")?.envKeys).toContain("GEMINI_API_KEY")
+  expect(getPreset("azure")?.adapter).toBe("azure")
   expect(getPreset("ollama")?.requiresKey).toBe(false)
 })
 

@@ -94,6 +94,27 @@ test("headless exits 0 on complete", async () => {
   expect(store.load("h1").status).toBe("done")
 })
 
+test("rejects image input for models without vision before dispatch", async () => {
+  const dir = join(tmpdir(), "nexus-cli-" + Math.random().toString(36).slice(2))
+  const store = new JSONLStore(dir)
+  const provider = new MockProvider([{ content: "should not run" }])
+  await expect(
+    consumeHeadless(
+      [{ role: "user", content: "look", images: [{ mimeType: "image/png", data: "aGk=" }] }],
+      {
+        runtime: runtime({ provider, store }),
+        cwd: dir,
+        model: "deepseek-chat",
+        maxSteps: 5,
+        sessionId: "vision",
+        signal: new AbortController().signal,
+        autoApprove: false,
+        write: () => {},
+      },
+    ),
+  ).rejects.toThrow(/does not support image input/)
+})
+
 test("headless exits 2 when aborted", async () => {
   const dir = join(tmpdir(), "nexus-cli-" + Math.random().toString(36).slice(2))
   const store = new JSONLStore(dir)

@@ -207,7 +207,9 @@ export function loadConfig(opts: { model?: string; file?: string; cwd?: string }
     compactModel: process.env.NEXUS_COMPACT_MODEL ?? raw.compactModel ?? DEFAULTS.compactModel,
     compactThreshold:
       num(process.env.NEXUS_COMPACT_THRESHOLD) ?? raw.compactThreshold ?? DEFAULTS.compactThreshold,
-    baseUrl: process.env.NEXUS_BASE_URL ?? (fromPreset ? fromPreset.baseUrl : raw.baseUrl),
+    baseUrl:
+      process.env.NEXUS_BASE_URL ??
+      (fromPreset?.id === "azure" ? process.env.AZURE_OPENAI_ENDPOINT : fromPreset ? fromPreset.baseUrl : raw.baseUrl),
     permission: raw.permission,
     instructions: raw.instructions,
     mcp: raw.mcp,
