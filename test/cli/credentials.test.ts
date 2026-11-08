@@ -52,6 +52,7 @@ test("presets cover curated providers", () => {
   expect(PRESETS.map((p) => p.id)).toEqual([
     "anthropic",
     "openai",
+    "openai-responses",
     "gemini",
     "azure",
     "openrouter",
@@ -67,6 +68,7 @@ test("presets cover curated providers", () => {
   expect(getPreset("gemini")?.baseUrl).toContain("generativelanguage.googleapis.com")
   expect(getPreset("gemini")?.adapter).toBe("gemini")
   expect(getPreset("gemini")?.envKeys).toContain("GEMINI_API_KEY")
+  expect(getPreset("openai-responses")?.adapter).toBe("openai-responses")
   expect(getPreset("azure")?.adapter).toBe("azure")
   expect(getPreset("ollama")?.requiresKey).toBe(false)
 })

@@ -848,6 +848,35 @@ test("manages PTY and persistent terminal sessions over HTTP", async () => {
     )
     expect(output.data).toEqual({ data: "hello\n", offset: 6 })
 
+    const connect = await json<{ data: { ticket: string; expires_in: number } }>(
+      await post(server, `/api/pty/${pty.id}/connect-token`, {}),
+    )
+    expect(connect.data.expires_in).toBeGreaterThan(0)
+    const socketUrl = new URL(`${server.url}/api/pty/${pty.id}/connect`)
+    socketUrl.protocol = "ws:"
+    socketUrl.searchParams.set("ticket", connect.data.ticket)
+    const socket = new WebSocket(socketUrl)
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("PTY socket timed out")), 3_000)
+        let received = ""
+        socket.onmessage = (event) => {
+          received += String(event.data)
+          if (received.includes("ws\n")) {
+            clearTimeout(timer)
+            resolve()
+          }
+        }
+        socket.onerror = () => {
+          clearTimeout(timer)
+          reject(new Error("PTY socket failed"))
+        }
+        socket.onopen = () => socket.send("ws\n")
+      })
+    } finally {
+      socket.close()
+    }
+
     const session = await json<{ data: { id: string } }>(await post(server, "/api/session", {}))
     const terminal = await json<{ data: PtyInfo }>(
       await post(server, `/api/experimental/session/${session.data.id}/terminal`, {}),
