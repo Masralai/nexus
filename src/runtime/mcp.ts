@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import type { Subprocess } from "bun"
 import type { McpControl, McpToolInfo, Tool, ToolResult } from "../engine/types"
 import type { McpServerConfig } from "../cli/config"
+import { readSSE } from "../providers/sse"
 
 interface JsonRpcResponse {
   jsonrpc?: string
@@ -311,6 +312,161 @@ class HttpClient implements Client {
   }
 }
 
+class SseClient implements Client {
+  transport = "sse" as const
+  connected = false
+  error?: string
+  serverInfo?: { name?: string; version?: string }
+  toolList: McpToolInfo[] = []
+  resourceList: Client["resourceList"] = []
+  promptList: Client["promptList"] = []
+  private nextId = 1
+  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>()
+  private endpoint?: string
+  private endpointReady: Promise<void>
+  private resolveEndpoint!: () => void
+  private controller = new AbortController()
+
+  constructor(readonly name: string, readonly config: McpServerConfig) {
+    if (!config.url) throw new Error(`mcp server ${name}: url is required`)
+    this.endpointReady = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`mcp server ${name}: SSE endpoint not announced`)), 10_000)
+      this.resolveEndpoint = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+    })
+  }
+
+  private async readLoop(): Promise<void> {
+    const res = await fetch(this.config.url!, {
+      headers: { Accept: "text/event-stream", ...(this.config.headers ?? {}) },
+      signal: this.controller.signal,
+    })
+    if (!res.ok || !res.body) throw new Error(`mcp ${this.name}: HTTP ${res.status}`)
+    for await (const event of readSSE(res.body)) {
+      if (event.event === "endpoint") {
+        this.endpoint = new URL(event.data, this.config.url).toString()
+        this.resolveEndpoint()
+        continue
+      }
+      if (!event.data) continue
+      let msg: JsonRpcResponse
+      try {
+        msg = JSON.parse(event.data) as JsonRpcResponse
+      } catch {
+        continue
+      }
+      if (msg.id === undefined) continue
+      const waiter = this.pending.get(Number(msg.id))
+      if (!waiter) continue
+      this.pending.delete(Number(msg.id))
+      clearTimeout(waiter.timer)
+      if (msg.error) waiter.reject(rpcError(msg.error))
+      else waiter.resolve(msg.result)
+    }
+  }
+
+  private async post(payload: unknown): Promise<Response> {
+    await this.endpointReady
+    if (!this.endpoint) throw new Error(`mcp server ${this.name}: SSE endpoint missing`)
+    return fetch(this.endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.config.headers ?? {}),
+      },
+      body: JSON.stringify(payload),
+      signal: this.controller.signal,
+    })
+  }
+
+  async request(method: string, params?: unknown): Promise<unknown> {
+    if (!this.connected && method !== "initialize") throw new Error(`mcp server ${this.name} is not connected`)
+    const id = this.nextId++
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new Error(`mcp request timed out: ${method}`))
+      }, 20_000)
+      this.pending.set(id, { resolve, reject, timer })
+      void (async () => {
+        try {
+          const res = await this.post({ jsonrpc: "2.0", id, method, params: params ?? {} })
+          if (!res.ok) throw new Error(`mcp ${this.name}: HTTP ${res.status} ${res.statusText}`)
+        } catch (error) {
+          clearTimeout(timer)
+          this.pending.delete(id)
+          reject(error instanceof Error ? error : new Error(String(error)))
+        }
+      })()
+    })
+  }
+
+  async notify(method: string, params?: unknown): Promise<void> {
+    const res = await this.post({ jsonrpc: "2.0", method, params: params ?? {} })
+    if (!res.ok) throw new Error(`mcp ${this.name}: HTTP ${res.status} ${res.statusText}`)
+  }
+
+  async initialize(): Promise<void> {
+    void this.readLoop().catch((error) => {
+      this.connected = false
+      this.error = error instanceof Error ? error.message : String(error)
+      for (const [id, waiter] of this.pending) {
+        clearTimeout(waiter.timer)
+        waiter.reject(error instanceof Error ? error : new Error(String(error)))
+        this.pending.delete(id)
+      }
+    })
+    const result = (await this.request("initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "nexus", version: "1.0.0" },
+    })) as { serverInfo?: { name?: string; version?: string } }
+    this.serverInfo = result?.serverInfo
+    this.connected = true
+    await this.notify("notifications/initialized")
+    await this.refresh()
+  }
+
+  async refresh(): Promise<void> {
+    try {
+      const tools = (await this.request("tools/list")) as {
+        tools?: Array<{ name: string; description?: string; inputSchema?: unknown }>
+      }
+      this.toolList = (tools.tools ?? []).map((t) => ({
+        server: this.name,
+        name: t.name,
+        description: t.description ?? "",
+        inputSchema: t.inputSchema ?? { type: "object" },
+      }))
+    } catch {
+      this.toolList = []
+    }
+    try {
+      const resources = (await this.request("resources/list")) as {
+        resources?: Array<{ uri: string; name?: string; mimeType?: string }>
+      }
+      this.resourceList = (resources.resources ?? []).map((r) => ({ server: this.name, ...r }))
+    } catch {
+      this.resourceList = []
+    }
+    try {
+      const prompts = (await this.request("prompts/list")) as {
+        prompts?: Array<{ name: string; description?: string }>
+      }
+      this.promptList = (prompts.prompts ?? []).map((p) => ({ server: this.name, ...p }))
+    } catch {
+      this.promptList = []
+    }
+  }
+
+  async close(): Promise<void> {
+    this.connected = false
+    this.controller.abort()
+  }
+}
+
 export class McpManager implements McpControl {
   private clients = new Map<string, Client>()
   private connecting?: Promise<void>
@@ -320,6 +476,7 @@ export class McpManager implements McpControl {
   private create(name: string, cfg: McpServerConfig): Client {
     const type = cfg.type ?? (cfg.url ? "http" : "stdio")
     if (type === "stdio" || type === "local") return new StdioClient(name, cfg, this.cwd)
+    if (type === "sse") return new SseClient(name, cfg)
     return new HttpClient(name, cfg)
   }
 
