@@ -10,6 +10,8 @@ import { lsp } from "./lsp"
 import { task } from "./task"
 import { inbox, job_kill, job_list, job_start, job_status } from "./jobs"
 import { worktree_create, worktree_list, worktree_remove } from "./worktree"
+import { webfetch, websearch } from "./web"
+import { git_diff, git_log, git_status } from "./git"
 import { allFiles, displayPath, gitFiles, isBinaryLike } from "./walk"
 import {
   atomicWrite,
@@ -453,6 +455,8 @@ export { lsp } from "./lsp"
 export { task } from "./task"
 export { inbox, job_kill, job_list, job_start, job_status } from "./jobs"
 export { worktree_create, worktree_list, worktree_remove } from "./worktree"
+export { webfetch, websearch } from "./web"
+export { git_diff, git_log, git_status } from "./git"
 
 export function defaultTools(): Tool[] {
   return [
@@ -479,6 +483,11 @@ export function defaultTools(): Tool[] {
     worktree_create,
     worktree_list,
     worktree_remove,
+    webfetch,
+    websearch,
+    git_status,
+    git_diff,
+    git_log,
   ]
 }
 
