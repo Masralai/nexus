@@ -1,3 +1,5 @@
+import { ProviderError } from "./error"
+
 /** Combine a caller abort signal with a per-request timeout signal. */
 export function requestSignal(
   signal: AbortSignal | undefined,
@@ -51,14 +53,21 @@ export async function fetchWithRetry(
   const maxRetries = 2
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     init.signal?.throwIfAborted()
-    const res = await fetchImpl(url, init)
+    let res: Response
+    try {
+      res = await fetchImpl(url, init)
+    } catch (error) {
+      if (init.signal?.aborted) throw error
+      throw new ProviderError(label, { message: `${label}: request failed: ${error instanceof Error ? error.message : String(error)}` })
+    }
     if (res.ok) return res
+    const body = (await res.text()).slice(0, 500)
     if (!retryable.includes(res.status) || attempt === maxRetries) {
-      throw new Error(`${label}: HTTP ${res.status}: ${(await res.text()).slice(0, 500)}`)
+      throw new ProviderError(label, { status: res.status, body })
     }
     const retryAfter = parseRetryAfter(res.headers.get("retry-after"))
     const delayMs = retryAfter ?? 500 * Math.pow(2, attempt) + Math.random() * 250
     await sleep(Math.min(delayMs, 5_000), init.signal ?? undefined)
   }
-  throw new Error(`${label}: retry exhausted`)
+  throw new ProviderError(label, { code: "retry_exhausted", message: `${label}: retry exhausted` })
 }

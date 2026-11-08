@@ -1,4 +1,4 @@
-export type AdapterId = "anthropic" | "openai-compatible"
+export type AdapterId = "anthropic" | "openai-compatible" | "gemini" | "azure"
 
 export interface Preset {
   id: string
@@ -33,10 +33,18 @@ export const PRESETS: Preset[] = [
   {
     id: "gemini",
     label: "Google Gemini",
-    adapter: "openai-compatible",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    adapter: "gemini",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
     suggestedModels: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
     envKeys: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    requiresKey: true,
+  },
+  {
+    id: "azure",
+    label: "Azure OpenAI",
+    adapter: "azure",
+    suggestedModels: ["gpt-4o", "gpt-4o-mini"],
+    envKeys: ["AZURE_OPENAI_API_KEY"],
     requiresKey: true,
   },
   {

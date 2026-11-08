@@ -15,6 +15,10 @@ export interface OpenAICompatibleConfig {
   maxTokens?: number
   /** Wall-clock limit for one streaming request. Timeouts stay distinct from aborts. */
   timeoutMs?: number
+  /** Override the request URL builder (Azure deployments append api-version). */
+  endpoint?: (base: string, model: string) => string
+  /** Azure uses `api-key` instead of a Bearer token. */
+  apiKeyHeader?: "authorization" | "api-key"
   fetchImpl?: typeof fetch
 }
 
@@ -86,12 +90,16 @@ export class OpenAICompatible implements Provider {
 
   async *stream(messages: Message[], tools: ToolDefinition[], opts: StreamOptions): AsyncIterable<ProviderEvent> {
     const base = (this.cfg.baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "")
+    const endpoint = this.cfg.endpoint ? this.cfg.endpoint(base, this.cfg.model) : `${base}/chat/completions`
+    const headers: Record<string, string> = { "Content-Type": "application/json" }
+    if (this.cfg.apiKeyHeader === "api-key") headers["api-key"] = this.cfg.apiKey
+    else headers.Authorization = `Bearer ${this.cfg.apiKey}`
     const chat = toChatMessages(messages)
     if (opts.system) chat.unshift({ role: "system", content: opts.system })
     const signal = requestSignal(opts.signal, opts.timeoutMs ?? this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS)
-    const res = await fetchWithRetry(this.fetchImpl, "openai-compatible", `${base}/chat/completions`, {
+    const res = await fetchWithRetry(this.fetchImpl, "openai-compatible", endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.cfg.apiKey}` },
+      headers,
       body: JSON.stringify({
         ...(opts.params ?? {}),
         model: this.cfg.model,

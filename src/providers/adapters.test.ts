@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { Anthropic, toAnthropicMessages } from "./anthropic"
 import { OpenAICompatible, toChatMessages } from "./openai-compatible"
+import { ProviderError } from "./error"
 import type { ProviderEvent } from "./types"
 import type { Message, ToolDefinition } from "../engine/types"
 
@@ -51,9 +52,32 @@ test("openai: aggregates streamed tool calls", async () => {
   ])
 })
 
-test("openai: surfaces HTTP errors", async () => {
+test("openai: surfaces typed HTTP errors", async () => {
   const p = new OpenAICompatible({ apiKey: "k", model: "m", contextWindow: 8000, fetchImpl: fakeFetch("nope", 401) })
-  await expect(collect(p.stream([], emptyTools, {}))).rejects.toThrow(/HTTP 401/)
+  const error: unknown = await collect(p.stream([], emptyTools, {})).catch((caught) => caught)
+  expect(error).toBeInstanceOf(ProviderError)
+  expect(error as ProviderError).toMatchObject({ code: "authentication_error", status: 401, retryable: false })
+  expect((error as ProviderError).message).toMatch(/HTTP 401/)
+})
+
+test("azure: uses deployment URL and api-key header", async () => {
+  let captured: { url: string; headers: HeadersInit | undefined } | undefined
+  const p = new OpenAICompatible({
+    apiKey: "k",
+    model: "gpt-4o",
+    contextWindow: 8000,
+    baseUrl: "https://example.openai.azure.com",
+    endpoint: (base, model) => `${base}/openai/deployments/${model}/chat/completions?api-version=2024-10-21`,
+    apiKeyHeader: "api-key",
+    fetchImpl: (async (url: string, init: RequestInit) => {
+      captured = { url, headers: init.headers }
+      return new Response(fixture("openai-compatible", "text-stream.sse"), { status: 200 })
+    }) as unknown as typeof fetch,
+  })
+  await collect(p.stream([{ role: "user", content: "hi" }], emptyTools, {}))
+  expect(captured?.url).toBe("https://example.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21")
+  expect((captured?.headers as Record<string, string>)["api-key"]).toBe("k")
+  expect((captured?.headers as Record<string, string>).Authorization).toBeUndefined()
 })
 
 test("openai: toChatMessages is lossless for canonical messages", () => {
