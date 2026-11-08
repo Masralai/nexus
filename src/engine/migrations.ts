@@ -161,4 +161,9 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS jobs_session_idx ON jobs (session_id);
 `,
+  `
+ALTER TABLE projects ADD COLUMN name TEXT;
+ALTER TABLE projects ADD COLUMN icon TEXT;
+ALTER TABLE projects ADD COLUMN commands TEXT;
+`,
 ]

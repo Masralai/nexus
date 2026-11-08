@@ -11,6 +11,9 @@ export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
   worktree: text("worktree").notNull(),
   vcs: text("vcs"),
+  name: text("name"),
+  icon: text("icon"),
+  commands: text("commands"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 })

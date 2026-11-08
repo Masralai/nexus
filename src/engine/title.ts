@@ -1,5 +1,6 @@
-import type { Message } from "./types"
-import type { Provider } from "../providers/types"
+import type { Message, SessionMeta } from "./types"
+import type { Provider, Usage } from "../providers/types"
+import { estimateCost, getModelInfo } from "../providers/catalog"
 
 /** First line of raw text, capped for pickers and session titles. */
 export function titleFromText(text: string): string | undefined {
@@ -57,7 +58,12 @@ export function cleanTitle(raw: string): string | undefined {
 export async function generateTitle(
   provider: Provider,
   messages: readonly Message[],
-  opts: { signal?: AbortSignal; params?: Record<string, unknown> } = {},
+  opts: {
+    signal?: AbortSignal
+    params?: Record<string, unknown>
+    /** Report the title model's usage so Session accounting stays complete. */
+    onUsage?: (usage: Usage) => void
+  } = {},
 ): Promise<string | undefined> {
   const firstUser = messages.find(
     (m): m is Extract<Message, { role: "user" }> =>
@@ -76,9 +82,68 @@ export async function generateTitle(
     ...(firstAssistant ? [`Assistant: ${(firstAssistant.content ?? "").slice(0, 2_000)}`] : []),
   ].join("\n")
   let out = ""
+  let usage: Usage | undefined
   for await (const event of provider.stream([{ role: "user", content: prompt }], [], opts)) {
     if (event.type === "token") out += event.text
-    else if (event.type === "done" && event.content) out = event.content
+    else if (event.type === "done") {
+      if (event.content) out = event.content
+      usage = event.usage
+    }
   }
+  if (usage) opts.onUsage?.(usage)
   return cleanTitle(out)
+}
+
+/** The slice of a Session store the title helper needs. */
+export interface TitleStore {
+  load(id: string): { meta: SessionMeta; messages: Message[] }
+  rename?(id: string, title: string): void
+  addUsage?(id: string, usage: Usage, cost?: number): void
+}
+
+export interface MaybeTitleOptions {
+  /** Skip generation entirely (config.autoTitle === false). */
+  disabled?: boolean
+  /** Model id used for cost accounting. */
+  model?: string
+  signal?: AbortSignal
+  params?: Record<string, unknown>
+  /** Called after the stored title is replaced, so a server can emit an event. */
+  onRename?: (title: string) => void
+}
+
+/**
+ * Replace a heuristic first-line title with a model-generated one.
+ *
+ * Only the fallback title is replaced: a title the user chose is never
+ * overwritten. Title usage is added to the Session counters, and failures stay
+ * cosmetic so a completed Turn is never failed by title generation.
+ */
+export async function maybeGenerateTitle(
+  store: TitleStore,
+  sessionId: string,
+  provider: Provider | undefined,
+  opts: MaybeTitleOptions = {},
+): Promise<string | undefined> {
+  if (!provider || opts.disabled) return undefined
+  const loaded = store.load(sessionId)
+  const heuristic = titleFromMessages(loaded.messages)
+  if (!heuristic || loaded.meta.title !== heuristic) return undefined
+  if (!loaded.messages.some((m) => m.role === "assistant" && m.content)) return undefined
+
+  const title = await generateTitle(provider, loaded.messages, {
+    signal: opts.signal,
+    params: opts.params,
+    onUsage: (usage) => {
+      try {
+        store.addUsage?.(sessionId, usage, estimateCost(getModelInfo(opts.model ?? loaded.meta.model), usage))
+      } catch {
+        /* accounting must never fail a title */
+      }
+    },
+  })
+  if (!title || title === loaded.meta.title) return undefined
+  store.rename?.(sessionId, title)
+  opts.onRename?.(title)
+  return title
 }

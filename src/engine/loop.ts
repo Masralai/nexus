@@ -1,7 +1,17 @@
 import { randomUUID } from "node:crypto"
 import type { Provider, Usage } from "../providers/types"
 import { estimateCost, getModelInfo } from "../providers/catalog"
-import { approxTextTokens, buildPrompt, budgetPct, budgetUsed, maybeCompact, type BuiltPrompt } from "./context"
+import {
+  CHARS_PER_TOKEN,
+  approxTextTokens,
+  buildPrompt,
+  budgetPct,
+  budgetUsed,
+  calibrateCharsPerToken,
+  maybeCompact,
+  promptChars,
+  type BuiltPrompt,
+} from "./context"
 import { advertiseTools, modePolicy, isReadonlyTool, type AgentMode } from "./mode"
 import {
   decide,
@@ -111,15 +121,15 @@ function isAbort(e: unknown, signal?: AbortSignal): boolean {
 }
 
 /**
- * Documented fallback when a provider omits usage: the same conservative
- * four-characters-per-token estimate the context budget uses. It counts the
- * full prompt (system plus messages) as input and the streamed answer as
- * output; cache and reasoning tokens are unknown and stay zero.
+ * Documented fallback when a provider omits usage: the calibrated
+ * characters-per-token estimate the context budget uses. It counts the full
+ * prompt (system plus messages) as input and the streamed answer as output;
+ * cache and reasoning tokens are unknown and stay zero.
  */
-function estimatedUsage(prompt: BuiltPrompt, content: string | null): Usage {
+function estimatedUsage(prompt: BuiltPrompt, content: string | null, charsPerToken = CHARS_PER_TOKEN): Usage {
   return {
-    inputTokens: budgetUsed(prompt.messages, approxTextTokens(prompt.system)),
-    outputTokens: approxTextTokens(content ?? ""),
+    inputTokens: budgetUsed(prompt.messages, approxTextTokens(prompt.system, charsPerToken), charsPerToken),
+    outputTokens: approxTextTokens(content ?? "", charsPerToken),
     reasoningTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
@@ -176,7 +186,10 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
       git: depth === 0 ? await gitSummary(cwd) : undefined,
     },
   })
-  const systemTokens = approxTextTokens(system)
+  // Starts at the documented conservative estimate and improves when a
+  // provider reports real prompt usage. Session-local: never shared.
+  let charsPerToken = CHARS_PER_TOKEN
+  const systemTokensNow = (): number => approxTextTokens(system, charsPerToken)
 
   let steps = 0
   let result = ""
@@ -223,8 +236,9 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
             threshold,
             keepRecent,
             limit,
-            systemTokens,
+            systemTokens: systemTokensNow(),
             params: cfg.providerParams,
+            charsPerToken,
           })
           if (compacted) {
             working = compacted
@@ -237,7 +251,12 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
                 /* persistence is best-effort here */
               }
             }
-            yield { type: "contextUpdate", used: budgetUsed(working, systemTokens), limit, pct: budgetPct(working, limit, systemTokens) }
+            yield {
+              type: "contextUpdate",
+              used: budgetUsed(working, systemTokensNow(), charsPerToken),
+              limit,
+              pct: budgetPct(working, limit, systemTokensNow(), charsPerToken),
+            }
           }
         } catch {
           // skip compaction; continue with truncation-only
@@ -245,7 +264,7 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
       }
 
       const toolDefs = advertiseTools(registry, mode)
-      const prompt = buildPrompt(working, system)
+      const prompt = buildPrompt(working, system, charsPerToken)
       const stream = provider.stream(prompt.messages, toolDefs, {
         signal: cfg.signal,
         system: prompt.system,
@@ -266,7 +285,17 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
         }
       }
 
-      const usage = stepUsage ?? estimatedUsage(prompt, content)
+      // Provider usage is the ground truth for prompt size. Blend it into the
+      // estimator so later compaction and context updates use this model's
+      // real chars-per-token ratio instead of a fixed constant.
+      if (stepUsage && stepUsage.inputTokens > 0) {
+        charsPerToken = calibrateCharsPerToken(
+          promptChars(prompt.messages, prompt.system),
+          stepUsage.inputTokens,
+          charsPerToken,
+        )
+      }
+      const usage = stepUsage ?? estimatedUsage(prompt, content, charsPerToken)
       const cost = estimateCost(getModelInfo(model), usage)
       try {
         store?.addUsage?.(sessionId, usage, cost)
@@ -300,7 +329,12 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
           continue
         }
         result = content ?? ""
-        yield { type: "contextUpdate", used: budgetUsed(working, systemTokens), limit, pct: budgetPct(working, limit, systemTokens) }
+        yield {
+          type: "contextUpdate",
+          used: budgetUsed(working, systemTokensNow(), charsPerToken),
+          limit,
+          pct: budgetPct(working, limit, systemTokensNow(), charsPerToken),
+        }
         yield { type: "turnComplete", step: steps }
         break
       }
@@ -448,7 +482,12 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
       }
 
       steps++
-      yield { type: "contextUpdate", used: budgetUsed(working, systemTokens), limit, pct: budgetPct(working, limit, systemTokens) }
+      yield {
+        type: "contextUpdate",
+        used: budgetUsed(working, systemTokensNow(), charsPerToken),
+        limit,
+        pct: budgetPct(working, limit, systemTokensNow(), charsPerToken),
+      }
       yield { type: "turnComplete", step: steps }
     }
 

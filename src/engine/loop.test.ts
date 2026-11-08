@@ -668,6 +668,24 @@ test("emits usage from the provider", async () => {
   })
 })
 
+test("calibrates context budgeting from provider-reported usage", async () => {
+  const provider = new MockProvider([
+    { content: "ok", usage: { inputTokens: 10, outputTokens: 1 } },
+  ])
+  const prompt: Message[] = [{ role: "user", content: "x".repeat(400) }]
+  const evts = await collect(run(prompt, cfg({ provider })))
+  const update = evts.find((e) => e.type === "contextUpdate")
+  expect(update?.type).toBe("contextUpdate")
+  if (update?.type === "contextUpdate") {
+    const defaultEstimate =
+      budgetUsed([
+        ...prompt,
+        { role: "assistant", content: "ok" },
+      ]) + Math.ceil((provider.lastSystem?.length ?? 0) / 4)
+    expect(update.used).toBeLessThan(defaultEstimate)
+  }
+})
+
 test("estimates usage when the provider omits it", async () => {
   const provider = new MockProvider([{ content: "four" }])
   const evts = await collect(run([{ role: "user", content: "prompt" }], cfg({ provider })))

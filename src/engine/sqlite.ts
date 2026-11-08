@@ -280,9 +280,29 @@ export class SQLiteStore implements SessionStore {
   }
 
   rename(id: string, title: string): void {
-    this.sqlite
-      .query("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
-      .run(title, new Date().toISOString(), id)
+    this.update(id, { title })
+  }
+
+  /** Update mutable Session metadata in one write. */
+  update(id: string, patch: { title?: string; model?: string; provider?: string }): void {
+    const sets: string[] = []
+    const values: Array<string> = []
+    if (patch.title !== undefined) {
+      sets.push("title = ?")
+      values.push(patch.title)
+    }
+    if (patch.model !== undefined) {
+      sets.push("model = ?")
+      values.push(patch.model)
+    }
+    if (patch.provider !== undefined) {
+      sets.push("provider = ?")
+      values.push(patch.provider)
+    }
+    if (sets.length === 0) return
+    sets.push("updated_at = ?")
+    values.push(new Date().toISOString(), id)
+    this.sqlite.query(`UPDATE sessions SET ${sets.join(", ")} WHERE id = ?`).run(...values)
   }
 
   delete(id: string): void {
@@ -290,10 +310,11 @@ export class SQLiteStore implements SessionStore {
       this.sqlite.query("DELETE FROM session_parts WHERE session_id = ?").run(id)
       this.sqlite.query("DELETE FROM session_pending WHERE session_id = ?").run(id)
       this.sqlite.query("DELETE FROM session_inbox WHERE session_id = ?").run(id)
-      this.sqlite.query("DELETE FROM event_sequence WHERE session_id = ?").run(id)
       this.sqlite.query("DELETE FROM jobs WHERE session_id = ?").run(id)
       this.sqlite.query("DELETE FROM sessions WHERE id = ?").run(id)
     })()
+    // Event history is intentionally retained so clients replaying from a
+    // cursor still observe the deletion instead of a gap.
   }
 
   /** Case-insensitive title and message text search. */
@@ -673,14 +694,62 @@ export class SQLiteStore implements SessionStore {
     return { id, worktree }
   }
 
-  listProjects(): Array<{ id: string; worktree: string; vcs?: string; updatedAt: string }> {
+  listProjects(): Array<{
+    id: string
+    worktree: string
+    vcs?: string
+    name?: string
+    icon?: Record<string, unknown>
+    commands?: Record<string, unknown>
+    updatedAt: string
+  }> {
     const rows = this.sqlite.query("SELECT * FROM projects ORDER BY updated_at DESC").all() as Array<{
       id: string
       worktree: string
       vcs: string | null
+      name: string | null
+      icon: string | null
+      commands: string | null
       updated_at: string
     }>
-    return rows.map((r) => ({ id: r.id, worktree: r.worktree, vcs: r.vcs ?? undefined, updatedAt: r.updated_at }))
+    return rows.map((r) => ({
+      id: r.id,
+      worktree: r.worktree,
+      vcs: r.vcs ?? undefined,
+      name: r.name ?? undefined,
+      icon: r.icon ? (JSON.parse(r.icon) as Record<string, unknown>) : undefined,
+      commands: r.commands ? (JSON.parse(r.commands) as Record<string, unknown>) : undefined,
+      updatedAt: r.updated_at,
+    }))
+  }
+
+  updateProject(
+    id: string,
+    patch: {
+      canonical?: string
+      name?: string
+      icon?: Record<string, unknown>
+      commands?: Record<string, unknown>
+    },
+  ): { id: string; worktree: string; vcs?: string; name?: string; icon?: Record<string, unknown>; commands?: Record<string, unknown>; updatedAt: string } {
+    const existing = this.listProjects().find((project) => project.id === id)
+    if (!existing) throw new Error(`project ${id} not found`)
+    const worktree = patch.canonical ?? existing.worktree
+    const name = patch.name ?? existing.name
+    const icon = patch.icon ?? existing.icon
+    const commands = patch.commands ?? existing.commands
+    const updatedAt = new Date().toISOString()
+    this.sqlite
+      .query("UPDATE projects SET worktree = ?, name = ?, icon = ?, commands = ?, updated_at = ? WHERE id = ?")
+      .run(
+        worktree,
+        name ?? null,
+        icon ? JSON.stringify(icon) : null,
+        commands ? JSON.stringify(commands) : null,
+        updatedAt,
+        id,
+      )
+    return { id, worktree, vcs: existing.vcs, name, icon, commands, updatedAt }
   }
 
   recordWorktree(directory: string, strategy?: string): void {

@@ -175,9 +175,38 @@ export interface JobControl {
   inbox(sessionId: string): InboxItem[]
 }
 
+export interface PtyInfo {
+  id: string
+  title: string
+  command: string
+  args: string[]
+  cwd: string
+  status: "running" | "exited"
+  pid: number
+  exitCode?: number
+}
+
+export interface PtyCreateOptions {
+  command?: string
+  args?: string[]
+  cwd?: string
+  title?: string
+  env?: Record<string, string>
+}
+
 export interface PtyControl {
   run(sessionId: string, command: string, opts?: { cwd?: string; timeoutMs?: number; onOutput?: (chunk: string) => void }): Promise<{ output: string; exitCode: number }>
   close(sessionId?: string): void
+  /** Create a PTY session without running a command through the marker protocol. */
+  create?(id: string, opts?: PtyCreateOptions): PtyInfo
+  list?(): PtyInfo[]
+  get?(id: string): PtyInfo | undefined
+  update?(id: string, opts: { title?: string; rows?: number; cols?: number }): PtyInfo
+  /** Raw terminal input for an interactive client. */
+  write?(id: string, data: string): void
+  /** Buffered output since a character offset. */
+  output?(id: string, offset?: number): { data: string; offset: number }
+  remove?(id: string): void
 }
 
 export interface WorktreeEntry {
@@ -228,6 +257,8 @@ export interface McpControl {
   status(): Array<{ name: string; connected: boolean; error?: string; transport: string }>
   connect(name?: string): Promise<void>
   disconnect(name?: string): Promise<void>
+  add?(name: string, config: unknown): Promise<void>
+  remove?(name: string): Promise<void>
   close(): Promise<void>
 }
 
