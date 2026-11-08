@@ -1,6 +1,7 @@
 import { Anthropic } from "./anthropic"
 import { Gemini } from "./gemini"
 import { OpenAICompatible } from "./openai-compatible"
+import { OpenAIResponses } from "./openai-responses"
 import { MockProvider } from "./mock"
 import { getModelInfo } from "./catalog"
 import type { Provider } from "./types"
@@ -37,6 +38,17 @@ export function createProvider(cfg: {
       endpoint,
       apiKeyHeader: "api-key",
       id: "azure",
+    })
+  }
+  if (cfg.provider === "openai-responses" || cfg.provider === "openai-compatible-responses") {
+    return new OpenAIResponses({
+      apiKey: cfg.apiKey ?? "",
+      model: cfg.model,
+      contextWindow,
+      baseUrl: cfg.baseUrl,
+      maxTokens: cfg.maxTokens,
+      timeoutMs: cfg.timeoutMs,
+      id: cfg.provider,
     })
   }
   if (cfg.provider === "gemini") {

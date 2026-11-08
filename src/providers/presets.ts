@@ -1,4 +1,4 @@
-export type AdapterId = "anthropic" | "openai-compatible" | "gemini" | "azure"
+export type AdapterId = "anthropic" | "openai-compatible" | "openai-responses" | "gemini" | "azure"
 
 export interface Preset {
   id: string
@@ -27,6 +27,15 @@ export const PRESETS: Preset[] = [
     adapter: "openai-compatible",
     baseUrl: "https://api.openai.com/v1",
     suggestedModels: ["gpt-4o", "gpt-4o-mini", "o3-mini"],
+    envKeys: ["OPENAI_API_KEY"],
+    requiresKey: true,
+  },
+  {
+    id: "openai-responses",
+    label: "OpenAI Responses",
+    adapter: "openai-responses",
+    baseUrl: "https://api.openai.com/v1",
+    suggestedModels: ["gpt-4.1", "o3", "o4-mini"],
     envKeys: ["OPENAI_API_KEY"],
     requiresKey: true,
   },
