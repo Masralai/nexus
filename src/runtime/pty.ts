@@ -1,12 +1,18 @@
 import { randomUUID } from "node:crypto"
-import type { PtyControl } from "../engine/types"
+import type { PtyControl, PtyCreateOptions, PtyInfo } from "../engine/types"
 
 interface Shell {
+  id: string
+  title: string
+  command: string
+  args: string[]
+  cwd: string
   proc: ReturnType<typeof Bun.spawn>
   terminal: Bun.Terminal
   buffer: string
   waiters: Array<{ marker: string; resolve: (r: { output: string; exitCode: number }) => void; timer: ReturnType<typeof setTimeout> }>
   closed: boolean
+  exitCode?: number
 }
 
 const DEFAULT_TIMEOUT = 30_000
@@ -29,9 +35,15 @@ function clean(text: string, command: string, marker: string): string {
   return lines.join("\n")
 }
 
-function shellFor(shells: Map<string, Shell>, key: string, cwd: string): Shell {
+function shellFor(
+  shells: Map<string, Shell>,
+  key: string,
+  cwd: string,
+  opts: PtyCreateOptions = {},
+): Shell {
   const existing = shells.get(key)
   if (existing && !existing.closed) return existing
+  if (existing) shells.delete(key)
   const bufferRef = { value: "" }
   const pending: Shell["waiters"] = []
   const terminal = new Bun.Terminal({
@@ -59,17 +71,25 @@ function shellFor(shells: Map<string, Shell>, key: string, cwd: string): Shell {
       }
     },
   })
-  const proc = Bun.spawn(["bash", "--noprofile", "--norc"], {
+  const command = opts.command ?? "bash"
+  const args = opts.args ?? (opts.command ? [] : ["--noprofile", "--norc"])
+  const proc = Bun.spawn([command, ...args], {
     cwd,
     terminal,
     env: {
       ...process.env,
+      ...opts.env,
       PS1: "",
       PS2: "",
       TERM: process.env.TERM || "xterm-256color",
     },
   })
   const shell: Shell = {
+    id: key,
+    title: opts.title ?? command,
+    command,
+    args,
+    cwd,
     proc,
     terminal,
     get buffer() {
@@ -81,8 +101,9 @@ function shellFor(shells: Map<string, Shell>, key: string, cwd: string): Shell {
     waiters: pending,
     closed: false,
   }
-  proc.exited.then(() => {
+  proc.exited.then((code) => {
     shell.closed = true
+    shell.exitCode = code
     for (const waiter of pending.splice(0)) {
       clearTimeout(waiter.timer)
       waiter.resolve({ output: bufferRef.value, exitCode: 1 })
@@ -90,6 +111,19 @@ function shellFor(shells: Map<string, Shell>, key: string, cwd: string): Shell {
   })
   shells.set(key, shell)
   return shell
+}
+
+function info(shell: Shell): PtyInfo {
+  return {
+    id: shell.id,
+    title: shell.title,
+    command: shell.command,
+    args: shell.args,
+    cwd: shell.cwd,
+    status: shell.closed ? "exited" : "running",
+    pid: shell.proc.pid,
+    ...(shell.exitCode !== undefined ? { exitCode: shell.exitCode } : {}),
+  }
 }
 
 /** Persistent shell per session: cwd and exported environment survive commands. */
@@ -143,6 +177,44 @@ export class PtyManager implements PtyControl {
       // Always hand the PTY to the next queued command, including on timeout.
       release()
     }
+  }
+
+  create(id: string, opts: PtyCreateOptions = {}): PtyInfo {
+    return info(shellFor(this.shells, id, opts.cwd ?? process.cwd(), opts))
+  }
+
+  list(): PtyInfo[] {
+    return [...this.shells.values()].map(info)
+  }
+
+  get(id: string): PtyInfo | undefined {
+    const shell = this.shells.get(id)
+    return shell ? info(shell) : undefined
+  }
+
+  update(id: string, opts: { title?: string; rows?: number; cols?: number }): PtyInfo {
+    const shell = this.shells.get(id)
+    if (!shell) throw new Error(`pty ${id} not found`)
+    if (opts.title !== undefined) shell.title = opts.title
+    if (opts.rows !== undefined && opts.cols !== undefined) shell.terminal.resize(opts.cols, opts.rows)
+    return info(shell)
+  }
+
+  write(id: string, data: string): void {
+    const shell = this.shells.get(id)
+    if (!shell || shell.closed) throw new Error(`pty ${id} is not running`)
+    shell.terminal.write(data)
+  }
+
+  output(id: string, offset = 0): { data: string; offset: number } {
+    const shell = this.shells.get(id)
+    if (!shell) throw new Error(`pty ${id} not found`)
+    const start = Math.max(0, Math.min(offset, shell.buffer.length))
+    return { data: shell.buffer.slice(start), offset: shell.buffer.length }
+  }
+
+  remove(id: string): void {
+    this.close(id)
   }
 
   close(sessionId?: string): void {

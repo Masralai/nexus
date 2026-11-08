@@ -357,6 +357,16 @@ export class McpManager implements McpControl {
     return this.connecting
   }
 
+  async add(name: string, config: McpServerConfig): Promise<void> {
+    this.config[name] = config
+    await this.connect(name)
+  }
+
+  async remove(name: string): Promise<void> {
+    await this.disconnect(name)
+    delete this.config[name]
+  }
+
   async disconnect(name?: string): Promise<void> {
     if (name) {
       const client = this.clients.get(name)
