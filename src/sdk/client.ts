@@ -169,6 +169,40 @@ export class NexusClient {
     return this.request<{ data: string; offset: number }>("ptyOutput", { ptyID }, { query: { offset, directory } })
   }
 
+  ptyConnectToken(ptyID: string) {
+    return this.request<{ ticket: string; expires_in: number }>("ptyConnectToken", { ptyID }, { method: "POST" })
+  }
+
+  persistentPtyConnectToken(ptyID: string) {
+    return this.request<{ ticket: string; expires_in: number }>(
+      "persistentPtyConnectToken",
+      { ptyID },
+      { method: "POST" },
+    )
+  }
+
+  /** Open a ticket-authenticated PTY socket. Resize with `ptyResize` on the returned socket. */
+  ptyConnect(ptyID: string, ticket: string, cursor = 0): WebSocket {
+    return this.websocket("ptyConnect", { ptyID }, ticket, cursor)
+  }
+
+  persistentPtyConnect(ptyID: string, ticket: string, cursor = 0): WebSocket {
+    return this.websocket("persistentPtyConnect", { ptyID }, ticket, cursor)
+  }
+
+  private websocket(name: RouteName, params: Record<string, string>, ticket: string, cursor: number): WebSocket {
+    const url = new URL(this.url + routePath(name, params))
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+    url.searchParams.set("ticket", ticket)
+    if (cursor > 0) url.searchParams.set("cursor", String(cursor))
+    return new WebSocket(url)
+  }
+
+  /** Send a resize frame understood by the Nexus PTY socket. */
+  ptyResize(socket: WebSocket, cols: number, rows: number): void {
+    socket.send(JSON.stringify({ type: "resize", cols, rows }))
+  }
+
   pluginList() {
     return this.request<Array<Record<string, unknown>>>("pluginList")
   }

@@ -13,6 +13,7 @@ import { allFiles } from "../tools/walk"
 import { authorized } from "./auth"
 import { ROUTES, type RouteName } from "./contract"
 import { ApiError, badGateway, badRequest, notFound, unavailable, unauthorized } from "./errors"
+import type { PtyTicketStore } from "./pty-ticket"
 import type { SessionService, SessionView } from "./service"
 import { eventStream } from "./sse"
 
@@ -343,6 +344,7 @@ export interface RouterOptions {
   config?: NexusConfig
   defaultCwd?: string
   info?: () => RouterInfo
+  tickets?: PtyTicketStore
 }
 
 type Handler = (input: {
@@ -634,6 +636,22 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
         throw error
       }
     },
+
+    ptyConnectToken: ({ params }) => {
+      if (!options.tickets) throw unavailable("PTY connect tickets are unavailable")
+      if (!managedPty(service).get(params.ptyID)) throw notFound(`pty ${params.ptyID} not found`)
+      return data(options.tickets.issue(params.ptyID))
+    },
+
+    ptyConnect: () => new Response("upgrade required", { status: 426 }),
+
+    persistentPtyConnectToken: ({ params }) => {
+      if (!options.tickets) throw unavailable("PTY connect tickets are unavailable")
+      if (!managedPty(service).get(params.ptyID)) throw notFound(`pty ${params.ptyID} not found`)
+      return data(options.tickets.issue(params.ptyID))
+    },
+
+    persistentPtyConnect: () => new Response("upgrade required", { status: 426 }),
 
     persistentPtyList: ({ params }) => {
       const info = managedPty(service).get(`terminal_${params.sessionID}`)
