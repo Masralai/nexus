@@ -2,9 +2,17 @@ import { expect, test } from "bun:test"
 import { MockProvider } from "../providers/mock"
 import { decide, type PermissionRules } from "./permission"
 import {
+  CHARS_PER_TOKEN,
+  MAX_CHARS_PER_TOKEN,
+  MIN_CHARS_PER_TOKEN,
+  approxTextTokens,
   approxTokens,
+  budgetUsed,
   buildPrompt,
+  calibrateCharsPerToken,
+  clampCharsPerToken,
   maybeCompact,
+  promptChars,
   toolBudget,
   truncate,
   truncateTool,
@@ -43,6 +51,26 @@ test("truncate keeps short text, caps long text with marker", () => {
 test("approxTokens scales with content length", () => {
   expect(approxTokens({ role: "user", content: "hello world" })).toBe(3)
   expect(approxTokens({ role: "tool", toolCallId: "c", name: "t", result: { ok: true, output: "1234" } })).toBe(1)
+})
+
+test("token estimates accept a calibrated chars-per-token ratio", () => {
+  expect(approxTextTokens("abcdefgh")).toBe(2)
+  expect(approxTextTokens("abcdefgh", 2)).toBe(4)
+  expect(approxTokens({ role: "user", content: "abcdefgh" }, 2)).toBe(4)
+  expect(budgetUsed([{ role: "user", content: "abcdefgh" }], 0, 2)).toBe(4)
+  expect(promptChars([{ role: "user", content: "abc" }], "de")).toBe(5)
+})
+
+test("calibration blends provider usage and stays within bounds", () => {
+  expect(calibrateCharsPerToken(400, 100)).toBe(CHARS_PER_TOKEN)
+  expect(calibrateCharsPerToken(400, 200)).toBeCloseTo(3.4, 5)
+  expect(calibrateCharsPerToken(0, 100)).toBe(CHARS_PER_TOKEN)
+  expect(calibrateCharsPerToken(400, 0)).toBe(CHARS_PER_TOKEN)
+  expect(calibrateCharsPerToken(10_000, 1)).toBe(MAX_CHARS_PER_TOKEN)
+  expect(calibrateCharsPerToken(1, 10_000)).toBeGreaterThanOrEqual(MIN_CHARS_PER_TOKEN)
+  expect(clampCharsPerToken(10)).toBe(MAX_CHARS_PER_TOKEN)
+  expect(clampCharsPerToken(0.1)).toBe(MIN_CHARS_PER_TOKEN)
+  expect(clampCharsPerToken(Number.NaN)).toBe(CHARS_PER_TOKEN)
 })
 
 test("tool budgets are per tool and bounded", () => {
