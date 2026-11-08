@@ -13,3 +13,5 @@ export const badRequest = (message: string): ApiError => new ApiError(400, "bad_
 export const unauthorized = (): ApiError => new ApiError(401, "unauthorized", "missing or invalid server token")
 export const notFound = (message: string): ApiError => new ApiError(404, "not_found", message)
 export const conflict = (message: string): ApiError => new ApiError(409, "conflict", message)
+export const unavailable = (message: string): ApiError => new ApiError(503, "unavailable", message)
+export const badGateway = (message: string): ApiError => new ApiError(502, "bad_gateway", message)

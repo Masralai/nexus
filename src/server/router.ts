@@ -1,20 +1,24 @@
+import { randomUUID } from "node:crypto"
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import type { NexusConfig } from "../cli/config"
 import { hasResolvableKey, loadConfig } from "../cli/config"
 import { advertiseTools, type AgentMode } from "../engine/mode"
 import type { PermissionReply } from "../engine/permission"
-import type { ImagePart, QuestionAnswer, ToolDefinition } from "../engine/types"
+import type { ImagePart, PtyCreateOptions, PtyInfo, QuestionAnswer, ToolDefinition } from "../engine/types"
 import { getModelInfo, listModels } from "../providers/catalog"
 import { PRESETS, getPreset, type Preset } from "../providers/presets"
 import { defaultTools } from "../tools"
+import { allFiles } from "../tools/walk"
 import { authorized } from "./auth"
 import { ROUTES, type RouteName } from "./contract"
-import { ApiError, badRequest, notFound, unauthorized } from "./errors"
+import { ApiError, badGateway, badRequest, notFound, unavailable, unauthorized } from "./errors"
 import type { SessionService, SessionView } from "./service"
 import { eventStream } from "./sse"
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
+  "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
   "access-control-allow-headers": "authorization,content-type,x-nexus-token",
   "access-control-expose-headers": "x-nexus-token",
 }
@@ -114,6 +118,148 @@ function cursor(value: string | null): number {
   return Math.floor(parsed)
 }
 
+function locationDirectory(url: URL, fallback: string): string {
+  const value =
+    url.searchParams.get("location[directory]") ??
+    url.searchParams.get("directory") ??
+    url.searchParams.get("location") ??
+    "."
+  return resolve(fallback, value)
+}
+
+function located(directory: string, value: unknown, status = 200): Response {
+  return json({ location: { directory }, data: value }, status)
+}
+
+function stringArray(input: Record<string, unknown>, key: string): string[] | undefined {
+  const value = input[key]
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw badRequest(`${key} must be an array of strings`)
+  }
+  return value as string[]
+}
+
+function stringMap(input: Record<string, unknown>, key: string): Record<string, string> | undefined {
+  const value = input[key]
+  if (value === undefined) return undefined
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw badRequest(`${key} must be an object`)
+  for (const item of Object.values(value)) {
+    if (typeof item !== "string") throw badRequest(`${key} values must be strings`)
+  }
+  return value as Record<string, string>
+}
+
+function fsEntryPath(base: string, full: string): string {
+  return relative(base, full).split(sep).join("/")
+}
+
+function listDirectory(base: string, path?: string): Array<{ path: string; type: "file" | "directory" }> {
+  const dir = resolve(base, path ?? ".")
+  if (!existsSync(dir)) throw notFound(`directory ${dir} not found`)
+  if (!statSync(dir).isDirectory()) throw badRequest(`not a directory: ${dir}`)
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.name !== ".git")
+    .map((entry) => ({
+      path: fsEntryPath(base, join(dir, entry.name)),
+      type: entry.isDirectory() ? ("directory" as const) : ("file" as const),
+    }))
+    .filter((entry) => entry.type === "file" || entry.type === "directory")
+}
+
+function walkDirectories(root: string, out: string[] = [], relativePath = ""): string[] {
+  if (out.length >= 50_000) return out
+  let entries
+  try {
+    entries = readdirSync(join(root, relativePath), { withFileTypes: true })
+  } catch {
+    return out
+  }
+  for (const entry of entries) {
+    if (entry.name === ".git" || entry.name === "node_modules") continue
+    const next = relativePath ? `${relativePath}/${entry.name}` : entry.name
+    if (entry.isDirectory()) {
+      out.push(next)
+      walkDirectories(root, out, next)
+    }
+  }
+  return out
+}
+
+function findEntries(
+  base: string,
+  query: string,
+  type: "file" | "directory" | undefined,
+  limit: number,
+): Array<{ path: string; type: "file" | "directory" }> {
+  const files = type === "directory" ? [] : allFiles(base)
+  const dirs = type === "file" ? [] : walkDirectories(base)
+  const needle = query.toLowerCase()
+  return [
+    ...files.map((path) => ({ path, type: "file" as const })),
+    ...dirs.map((path) => ({ path, type: "directory" as const })),
+  ]
+    .filter((entry) => !needle || entry.path.toLowerCase().includes(needle))
+    .slice(0, limit)
+}
+
+type ManagedPty = {
+  list(): PtyInfo[]
+  create(id: string, opts?: PtyCreateOptions): PtyInfo
+  get(id: string): PtyInfo | undefined
+  update(id: string, opts: { title?: string; rows?: number; cols?: number }): PtyInfo
+  write(id: string, data: string): void
+  output(id: string, offset?: number): { data: string; offset: number }
+  remove(id: string): void
+}
+
+function managedPty(service: SessionService): ManagedPty {
+  const pty = service.defaultWorkspace().controls?.pty as Partial<ManagedPty> | undefined
+  if (
+    !pty ||
+    typeof pty.list !== "function" ||
+    typeof pty.create !== "function" ||
+    typeof pty.get !== "function" ||
+    typeof pty.update !== "function" ||
+    typeof pty.write !== "function" ||
+    typeof pty.output !== "function" ||
+    typeof pty.remove !== "function"
+  ) {
+    throw unavailable("PTY control is unavailable")
+  }
+  return pty as ManagedPty
+}
+
+function projectView(project: {
+  id: string
+  worktree: string
+  vcs?: string
+  name?: string
+  icon?: Record<string, unknown>
+  commands?: Record<string, unknown>
+  updatedAt: string
+}): Record<string, unknown> {
+  return {
+    id: project.id,
+    canonical: project.worktree,
+    name: project.name ?? basename(project.worktree),
+    ...(project.vcs ? { vcs: project.vcs } : {}),
+    ...(project.icon ? { icon: project.icon } : {}),
+    ...(project.commands ? { commands: project.commands } : {}),
+    time: { created: project.updatedAt, updated: project.updatedAt },
+    sandboxes: [],
+  }
+}
+
+function referenceList(cfg: NexusConfig, base: string): Array<Record<string, unknown>> {
+  return (cfg.instructions ?? [])
+    .filter((path) => !/^https?:\/\//i.test(path))
+    .map((path) => {
+      const full = resolve(base, path)
+      return { name: basename(full), path: full, source: { type: "local", path: full } }
+    })
+}
+
 function permissionReply(value: unknown): PermissionReply {
   if (value === true || value === "allow" || value === "once") return true
   if (value === "always") return "always"
@@ -195,6 +341,7 @@ export interface RouterOptions {
   service: SessionService
   token: string
   config?: NexusConfig
+  defaultCwd?: string
   info?: () => RouterInfo
 }
 
@@ -214,17 +361,21 @@ interface CompiledRoute {
 function match(pathname: string, pattern: string): Record<string, string> | undefined {
   const actual = pathname.replace(/\/+$/, "").split("/").filter(Boolean)
   const expected = pattern.split("/").filter(Boolean)
-  if (actual.length !== expected.length) return undefined
   const params: Record<string, string> = {}
   for (let i = 0; i < expected.length; i++) {
     const part = expected[i]
+    if (part === "*") {
+      params["*"] = actual.slice(i).map(decodeURIComponent).join("/")
+      return params
+    }
+    if (actual[i] === undefined) return undefined
     if (part.startsWith(":")) {
       params[part.slice(1)] = decodeURIComponent(actual[i])
     } else if (part !== actual[i]) {
       return undefined
     }
   }
-  return params
+  return actual.length === expected.length ? params : undefined
 }
 
 /**
@@ -234,6 +385,7 @@ function match(pathname: string, pattern: string): Record<string, string> | unde
 export function createRouter(options: RouterOptions): (req: Request) => Promise<Response> {
   const cfg = options.config ?? loadConfig()
   const service = options.service
+  const defaultCwd = options.defaultCwd ?? process.cwd()
 
   const handlers: Record<RouteName, Handler> = {
     info: () =>
@@ -268,6 +420,300 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
     commands: () => data(commandList(cfg)),
 
     tools: ({ url }) => data(toolList(parseMode(url.searchParams.get("mode")))),
+
+    location: ({ url }) => {
+      const directory = locationDirectory(url, defaultCwd)
+      const project = service.projectFor(directory)
+      return data({
+        directory,
+        project: { id: project.id, directory: project.directory, canonical: project.canonical },
+      })
+    },
+
+    locationReload: async () => {
+      await service.reloadWorkspaces()
+      return noContent()
+    },
+
+    debugLocations: () => data(service.workspaces()),
+
+    debugEvict: ({ url }) => {
+      service.evictWorkspace(locationDirectory(url, defaultCwd), url.searchParams.get("model") ?? undefined)
+      return noContent()
+    },
+
+    fsList: ({ url }) => {
+      const base = locationDirectory(url, defaultCwd)
+      return located(base, listDirectory(base, url.searchParams.get("path") ?? undefined))
+    },
+
+    fsRead: ({ url, params }) => {
+      const base = locationDirectory(url, defaultCwd)
+      const full = resolve(base, params["*"] ?? "")
+      if (!existsSync(full)) throw notFound(`file ${full} not found`)
+      if (!statSync(full).isFile()) throw badRequest(`not a file: ${full}`)
+      return new Response(Bun.file(full), { headers: { "cache-control": "no-store" } })
+    },
+
+    fsFind: ({ url }) => {
+      const base = locationDirectory(url, defaultCwd)
+      const query = url.searchParams.get("query")
+      if (query === null) throw badRequest("query is required")
+      const typeRaw = url.searchParams.get("type")
+      if (typeRaw !== null && typeRaw !== "file" && typeRaw !== "directory") {
+        throw badRequest("type must be file or directory")
+      }
+      const limit = positiveInt(url.searchParams.get("limit"), 200, 10_000)
+      return located(base, findEntries(base, query, typeRaw ?? undefined, limit))
+    },
+
+    fsWrite: async ({ req, url }) => {
+      const base = locationDirectory(url, defaultCwd)
+      const path = url.searchParams.get("path")
+      if (!path) throw badRequest("path is required")
+      const full = isAbsolute(path) ? path : resolve(base, path)
+      mkdirSync(dirname(full), { recursive: true })
+      writeFileSync(full, await req.text())
+      return located(base, { path: full })
+    },
+
+    mcpList: ({ url }) => {
+      const directory = locationDirectory(url, defaultCwd)
+      const mcp = service.workspace(directory).controls?.mcp
+      if (!mcp) throw unavailable("MCP control is unavailable")
+      const servers = mcp.status().map((server) => ({
+        name: server.name,
+        status: server.connected
+          ? { status: "connected" }
+          : server.error
+            ? { status: "failed", error: server.error }
+            : { status: "pending" },
+      }))
+      return located(directory, servers)
+    },
+
+    mcpAdd: async ({ req, url, params }) => {
+      const directory = locationDirectory(url, defaultCwd)
+      const mcp = service.workspace(directory).controls?.mcp
+      if (!mcp?.add) throw unavailable("MCP control is unavailable")
+      const input = await body(req)
+      const config = input.config
+      if (!config || typeof config !== "object" || Array.isArray(config)) {
+        throw badRequest("config must be an object")
+      }
+      try {
+        await mcp.add(params.server, config)
+      } catch (error) {
+        throw badGateway(error instanceof Error ? error.message : String(error))
+      }
+      return noContent()
+    },
+
+    mcpRemove: async ({ url, params }) => {
+      const directory = locationDirectory(url, defaultCwd)
+      const mcp = service.workspace(directory).controls?.mcp
+      if (!mcp?.remove) throw unavailable("MCP control is unavailable")
+      if (!mcp.status().some((server) => server.name === params.server)) {
+        throw notFound(`MCP server ${params.server} not found`)
+      }
+      try {
+        await mcp.remove(params.server)
+      } catch (error) {
+        throw badGateway(error instanceof Error ? error.message : String(error))
+      }
+      return noContent()
+    },
+
+    mcpConnect: async ({ url, params }) => {
+      const directory = locationDirectory(url, defaultCwd)
+      const mcp = service.workspace(directory).controls?.mcp
+      if (!mcp) throw unavailable("MCP control is unavailable")
+      if (!mcp.status().some((server) => server.name === params.server)) {
+        throw notFound(`MCP server ${params.server} not found`)
+      }
+      try {
+        await mcp.connect(params.server)
+      } catch (error) {
+        throw badGateway(error instanceof Error ? error.message : String(error))
+      }
+      return noContent()
+    },
+
+    mcpDisconnect: async ({ url, params }) => {
+      const directory = locationDirectory(url, defaultCwd)
+      const mcp = service.workspace(directory).controls?.mcp
+      if (!mcp) throw unavailable("MCP control is unavailable")
+      if (!mcp.status().some((server) => server.name === params.server)) {
+        throw notFound(`MCP server ${params.server} not found`)
+      }
+      try {
+        await mcp.disconnect(params.server)
+      } catch (error) {
+        throw badGateway(error instanceof Error ? error.message : String(error))
+      }
+      return noContent()
+    },
+
+    mcpResources: async ({ url }) => {
+      const directory = locationDirectory(url, defaultCwd)
+      const mcp = service.workspace(directory).controls?.mcp
+      if (!mcp) throw unavailable("MCP control is unavailable")
+      return located(directory, { resources: await mcp.resources(), templates: [] })
+    },
+
+    ptyList: ({ url }) => located(locationDirectory(url, defaultCwd), managedPty(service).list()),
+
+    ptyCreate: async ({ req, url }) => {
+      const base = locationDirectory(url, defaultCwd)
+      const input = await body(req)
+      const cwd = stringField(input, "cwd", false)
+      const command = stringField(input, "command", false)
+      const title = stringField(input, "title", false)
+      const args = stringArray(input, "args")
+      const env = stringMap(input, "env")
+      const info = managedPty(service).create(`pty_${randomUUID()}`, {
+        cwd: resolve(base, cwd ?? "."),
+        ...(command ? { command } : {}),
+        ...(args ? { args } : {}),
+        ...(title ? { title } : {}),
+        ...(env ? { env } : {}),
+      })
+      return located(base, info, 201)
+    },
+
+    ptyGet: ({ url, params }) => {
+      const base = locationDirectory(url, defaultCwd)
+      const info = managedPty(service).get(params.ptyID)
+      if (!info) throw notFound(`pty ${params.ptyID} not found`)
+      return located(base, info)
+    },
+
+    ptyUpdate: async ({ req, url, params }) => {
+      const base = locationDirectory(url, defaultCwd)
+      const input = await body(req)
+      const title = stringField(input, "title", false)
+      const size = input.size as { rows?: unknown; cols?: unknown } | undefined
+      if (size !== undefined && (!size || typeof size !== "object")) throw badRequest("size must be an object")
+      const rows = typeof size?.rows === "number" && size.rows > 0 ? Math.floor(size.rows) : undefined
+      const cols = typeof size?.cols === "number" && size.cols > 0 ? Math.floor(size.cols) : undefined
+      try {
+        return located(base, managedPty(service).update(params.ptyID, { ...(title ? { title } : {}), rows, cols }))
+      } catch (error) {
+        if (/not found/.test(error instanceof Error ? error.message : "")) throw notFound(`pty ${params.ptyID} not found`)
+        throw error
+      }
+    },
+
+    ptyRemove: ({ params }) => {
+      const control = managedPty(service)
+      if (!control.get(params.ptyID)) throw notFound(`pty ${params.ptyID} not found`)
+      control.remove(params.ptyID)
+      return noContent()
+    },
+
+    ptyInput: async ({ req, params }) => {
+      const input = await body(req)
+      const data = stringField(input, "data")
+      try {
+        managedPty(service).write(params.ptyID, data!)
+      } catch (error) {
+        if (/not found|not running/.test(error instanceof Error ? error.message : "")) {
+          throw notFound(`pty ${params.ptyID} not found or exited`)
+        }
+        throw error
+      }
+      return noContent()
+    },
+
+    ptyOutput: ({ url, params }) => {
+      const base = locationDirectory(url, defaultCwd)
+      try {
+        return located(base, managedPty(service).output(params.ptyID, cursor(url.searchParams.get("offset"))))
+      } catch (error) {
+        if (/not found/.test(error instanceof Error ? error.message : "")) throw notFound(`pty ${params.ptyID} not found`)
+        throw error
+      }
+    },
+
+    persistentPtyList: ({ params }) => {
+      const info = managedPty(service).get(`terminal_${params.sessionID}`)
+      return data(info ? [info] : [])
+    },
+
+    persistentPtyCreate: async ({ req, params }) => {
+      const session = service.get(params.sessionID)
+      const input = await body(req)
+      const command = stringField(input, "command", false)
+      const title = stringField(input, "title", false)
+      const args = stringArray(input, "args")
+      const env = stringMap(input, "env")
+      const info = managedPty(service).create(`terminal_${params.sessionID}`, {
+        cwd: session.cwd,
+        ...(command ? { command } : {}),
+        ...(args ? { args } : {}),
+        ...(title ? { title } : {}),
+        ...(env ? { env } : {}),
+      })
+      return data(info, 201)
+    },
+
+    persistentPtyGet: ({ params }) => {
+      const info = managedPty(service).get(params.ptyID)
+      if (!info) throw notFound(`pty ${params.ptyID} not found`)
+      return data(info)
+    },
+
+    persistentPtyRemove: ({ params }) => {
+      const control = managedPty(service)
+      if (!control.get(params.ptyID)) throw notFound(`pty ${params.ptyID} not found`)
+      control.remove(params.ptyID)
+      return noContent()
+    },
+
+    pluginList: ({ url }) => data(service.pluginInfo(locationDirectory(url, defaultCwd))),
+
+    projectList: () => data(service.listProjects().map(projectView)),
+
+    projectUpdate: async ({ req, params }) => {
+      const input = await body(req)
+      const canonical = stringField(input, "canonical", false)
+      const name = stringField(input, "name", false)
+      const iconRaw = input.icon
+      const commandsRaw = input.commands
+      if (iconRaw !== undefined && (!iconRaw || typeof iconRaw !== "object" || Array.isArray(iconRaw))) {
+        throw badRequest("icon must be an object")
+      }
+      if (
+        commandsRaw !== undefined &&
+        (!commandsRaw || typeof commandsRaw !== "object" || Array.isArray(commandsRaw))
+      ) {
+        throw badRequest("commands must be an object")
+      }
+      if (canonical === undefined && name === undefined && iconRaw === undefined && commandsRaw === undefined) {
+        throw badRequest("canonical, name, icon, or commands is required")
+      }
+      return data(
+        projectView(
+          service.updateProject(params.projectID, {
+            ...(canonical !== undefined ? { canonical } : {}),
+            ...(name !== undefined ? { name } : {}),
+            ...(iconRaw !== undefined ? { icon: iconRaw as Record<string, unknown> } : {}),
+            ...(commandsRaw !== undefined ? { commands: commandsRaw as Record<string, unknown> } : {}),
+          }),
+        ),
+      )
+    },
+
+    referenceList: ({ url }) => data(referenceList(cfg, locationDirectory(url, defaultCwd))),
+
+    formList: () => data(service.pendingForms()),
+
+    generate: async ({ req }) => {
+      const input = await body(req)
+      const prompt = stringField(input, "prompt")
+      const model = stringField(input, "model", false)
+      return data({ text: await service.generate({ prompt: prompt!, ...(model ? { model } : {}) }) })
+    },
 
     sessions: ({ url }) => {
       const search = url.searchParams.get("search") ?? url.searchParams.get("q") ?? undefined
@@ -318,8 +764,17 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
 
     sessionUpdate: async ({ req, params }) => {
       const input = await body(req)
-      const title = stringField(input, "title")
-      service.rename(params.sessionID, title!)
+      const title = stringField(input, "title", false)
+      const model = stringField(input, "model", false)
+      const provider = stringField(input, "provider", false)
+      if (title === undefined && model === undefined && provider === undefined) {
+        throw badRequest("title, model, or provider is required")
+      }
+      service.update(params.sessionID, {
+        ...(title !== undefined ? { title } : {}),
+        ...(model !== undefined ? { model } : {}),
+        ...(provider !== undefined ? { provider } : {}),
+      })
       return noContent()
     },
 

@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Runtime } from "../../src/cli/launch"
+import type { Runtime, RuntimeControls } from "../../src/cli/launch"
 import type { NexusConfig } from "../../src/cli/config"
-import type { Tool } from "../../src/engine/types"
+import type { LspControl, McpControl, PtyControl, PtyInfo, Tool } from "../../src/engine/types"
 import { SQLiteStore } from "../../src/engine/sqlite"
+import { PluginRegistry } from "../../src/plugins/hooks"
 import { MockProvider, type MockResponse } from "../../src/providers/mock"
 import { startServer, type ServerHandle } from "../../src/server/server"
 import { question } from "../../src/tools/question"
@@ -46,6 +47,90 @@ const danger: Tool = {
 
 const ask: Tool = { ...question, readonly: true }
 
+function fakeLsp(): LspControl {
+  return { query: async () => ({ ok: true, output: "" }), status: () => [] }
+}
+
+function fakeMcp(): McpControl {
+  const status = [{ name: "demo", connected: false, transport: "stdio" }]
+  return {
+    tools: () => [],
+    call: async () => ({ ok: true, output: "" }),
+    resources: async () => [{ server: "demo", uri: "file:///readme", name: "README" }],
+    readResource: async () => ({}),
+    prompts: async () => [],
+    getPrompt: async () => ({}),
+    status: () => status,
+    connect: async (name) => {
+      const server = name ? status.find((item) => item.name === name) : status[0]
+      if (server) server.connected = true
+    },
+    disconnect: async (name) => {
+      for (const server of status) if (!name || server.name === name) server.connected = false
+    },
+    add: async (name, config) => {
+      if (!status.some((server) => server.name === name)) {
+        status.push({
+          name,
+          connected: true,
+          transport: (config as { url?: string }).url ? "http" : "stdio",
+        })
+      }
+    },
+    remove: async (name) => {
+      const index = status.findIndex((server) => server.name === name)
+      if (index >= 0) status.splice(index, 1)
+    },
+    close: async () => undefined,
+  }
+}
+
+function fakePty(fallbackCwd: string): PtyControl {
+  const shells = new Map<string, { info: PtyInfo; buffer: string }>()
+  return {
+    run: async () => ({ output: "", exitCode: 0 }),
+    close: () => shells.clear(),
+    create: (id, opts = {}) => {
+      const info: PtyInfo = {
+        id,
+        title: opts.title ?? "bash",
+        command: opts.command ?? "bash",
+        args: opts.args ?? [],
+        cwd: opts.cwd ?? fallbackCwd,
+        status: "running",
+        pid: 4321,
+      }
+      shells.set(id, { info, buffer: "" })
+      return info
+    },
+    list: () => [...shells.values()].map((shell) => shell.info),
+    get: (id) => shells.get(id)?.info,
+    update: (id, opts) => {
+      const shell = shells.get(id)
+      if (!shell) throw new Error(`pty ${id} not found`)
+      if (opts.title !== undefined) shell.info.title = opts.title
+      return shell.info
+    },
+    write: (id, data) => {
+      const shell = shells.get(id)
+      if (!shell) throw new Error(`pty ${id} not found`)
+      shell.buffer += data
+    },
+    output: (id, offset = 0) => {
+      const shell = shells.get(id)
+      if (!shell) throw new Error(`pty ${id} not found`)
+      return { data: shell.buffer.slice(offset), offset: shell.buffer.length }
+    },
+    remove: (id) => {
+      shells.delete(id)
+    },
+  }
+}
+
+function fakeControls(dir: string): RuntimeControls {
+  return { pty: fakePty(dir), lsp: fakeLsp(), mcp: fakeMcp() }
+}
+
 interface TestServer {
   server: ServerHandle
   store: SQLiteStore
@@ -53,7 +138,14 @@ interface TestServer {
 }
 
 async function withServer(
-  opts: { script?: MockResponse[]; tools?: Tool[]; config?: Partial<NexusConfig>; title?: MockResponse[] },
+  opts: {
+    script?: MockResponse[]
+    tools?: Tool[]
+    config?: Partial<NexusConfig>
+    title?: MockResponse[]
+    controls?: RuntimeControls
+    plugins?: PluginRegistry
+  },
   run: (ctx: TestServer) => Promise<void>,
 ): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "nexus-server-"))
@@ -63,6 +155,8 @@ async function withServer(
     provider: new MockProvider(opts.script ?? []),
     compactProvider: new MockProvider(),
     ...(opts.title ? { titleProvider: new MockProvider(opts.title) } : {}),
+    ...(opts.plugins ? { plugins: opts.plugins } : {}),
+    ...(opts.controls ? { controls: opts.controls } : {}),
     registry: new Map((opts.tools ?? []).map((tool) => [tool.name, tool])),
     store,
   }
@@ -267,6 +361,49 @@ test("streams replayable SSE events with global cursors", async () => {
       (frame) => frame.event === "runComplete",
     )
     expect(all.some((frame) => frame.data?.sessionID === session.id)).toBe(true)
+  })
+})
+
+test("persists session mutation events and supports model/provider updates", async () => {
+  await withServer({ script: [{ content: "hello" }] }, async ({ server }) => {
+    const created = await post(server, "/api/session", { title: "initial" })
+    const { data: session } = await json<{ data: { id: string } }>(created)
+
+    const patched = await call(server, `/api/session/${session.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: "renamed", model: "mock", provider: "mock" }),
+    })
+    expect(patched.status).toBe(204)
+    const updated = await json<{ data: { title: string; model: string; provider: string } }>(
+      await call(server, `/api/session/${session.id}`),
+    )
+    expect(updated.data).toMatchObject({ title: "renamed", model: "mock", provider: "mock" })
+
+    const invalid = await call(server, `/api/session/${session.id}`, { method: "PATCH", body: JSON.stringify({}) })
+    expect(invalid.status).toBe(400)
+
+    await post(server, `/api/session/${session.id}/prompt`, { text: "hi" })
+    await waitFor(async () => ((await sessionStatus(server, session.id)) === "done" ? true : undefined))
+    const frames = await readSse(
+      `${server.url}/api/event?after=0`,
+      "test-token",
+      (frame) =>
+        frame.event === "sessionStatus" &&
+        (frame.data?.data as { status?: string } | undefined)?.status === "done",
+    )
+    const types = frames.filter((frame) => frame.data?.sessionID === session.id).map((frame) => frame.event)
+    expect(types).toContain("sessionCreated")
+    expect(types).toContain("sessionUpdated")
+    expect(types).toContain("sessionStatus")
+
+    expect((await call(server, `/api/session/${session.id}`, { method: "DELETE" })).status).toBe(204)
+    const deleted = await readSse(
+      `${server.url}/api/event?after=0`,
+      "test-token",
+      (frame) => frame.event === "sessionDeleted",
+    )
+    expect(deleted.some((frame) => frame.event === "sessionCreated")).toBe(true)
+    expect(deleted.some((frame) => frame.event === "sessionDeleted")).toBe(true)
   })
 })
 
@@ -565,6 +702,169 @@ test("auto titles are generated from the first exchange", async () => {
       expect(fetched.data.title).toBe("Repair resume deduplication")
     },
   )
+})
+
+test("exposes location, filesystem, project, reference, form, and plugin routes", async () => {
+  const plugins = new PluginRegistry().use({ name: "fixture" })
+  await withServer(
+    { config: { instructions: ["AGENTS.md"] }, plugins, controls: fakeControls(tmpdir()) },
+    async ({ server, dir }) => {
+      mkdirSync(join(dir, "src"))
+      writeFileSync(join(dir, "src", "a.ts"), "export const a = 1\n")
+
+      const location = await json<{ data: { directory: string; project: { id: string } } }>(
+        await call(server, `/api/location?directory=${encodeURIComponent(dir)}`),
+      )
+      expect(location.data.directory).toBe(dir)
+      expect(location.data.project.id.startsWith("proj_")).toBe(true)
+
+      const projects = await json<{ data: Array<{ id: string; canonical: string }> }>(
+        await call(server, "/api/project"),
+      )
+      expect(projects.data.some((project) => project.canonical === dir)).toBe(true)
+
+      const patched = await json<{
+        data: { name: string; commands: { start: string } }
+      }>(
+        await call(server, `/api/project/${location.data.project.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ name: "Renamed", commands: { start: "bun dev" } }),
+        }),
+      )
+      expect(patched.data).toMatchObject({ name: "Renamed", commands: { start: "bun dev" } })
+      const updatedProjects = await json<{ data: Array<{ id: string; name: string }> }>(
+        await call(server, "/api/project"),
+      )
+      expect(updatedProjects.data.find((project) => project.id === location.data.project.id)?.name).toBe("Renamed")
+
+      const listed = await json<{ data: Array<{ path: string; type: string }> }>(
+        await call(server, `/api/fs/list?directory=${encodeURIComponent(dir)}&path=src`),
+      )
+      expect(listed.data).toContainEqual({ path: "src/a.ts", type: "file" })
+
+      const read = await call(server, `/api/fs/read/src/a.ts?directory=${encodeURIComponent(dir)}`)
+      expect(await read.text()).toBe("export const a = 1\n")
+
+      const found = await json<{ data: Array<{ path: string; type: string }> }>(
+        await call(server, `/api/fs/find?directory=${encodeURIComponent(dir)}&query=a.ts`),
+      )
+      expect(found.data).toContainEqual({ path: "src/a.ts", type: "file" })
+
+      const written = await call(server, `/api/experimental/fs/write?directory=${encodeURIComponent(dir)}&path=notes/new.txt`, {
+        method: "POST",
+        body: "hello",
+        headers: { "content-type": "text/plain" },
+      })
+      expect(written.status).toBe(200)
+      expect(readFileSync(join(dir, "notes", "new.txt"), "utf8")).toBe("hello")
+
+      const references = await json<{ data: Array<{ name: string }> }>(
+        await call(server, `/api/reference?directory=${encodeURIComponent(dir)}`),
+      )
+      expect(references.data[0]?.name).toBe("AGENTS.md")
+
+      const forms = await json<{ data: unknown[] }>(await call(server, "/api/form"))
+      expect(forms.data).toEqual([])
+
+      const loaded = await json<{ data: Array<{ id: string; state: { status: string } }> }>(
+        await call(server, "/api/plugin"),
+      )
+      expect(loaded.data[0]?.id).toBe("fixture")
+      expect(loaded.data[0]?.state.status).toBe("active")
+
+      const debug = await json<{ data: Array<{ directory: string }> }>(await call(server, "/api/debug/location"))
+      expect(debug.data.some((entry) => entry.directory === dir)).toBe(true)
+      const evicted = await call(server, `/api/debug/location?directory=${encodeURIComponent(dir)}`, {
+        method: "DELETE",
+      })
+      expect(evicted.status).toBe(204)
+    },
+  )
+})
+
+test("exposes MCP status, connect/disconnect, resources, and one-shot generation", async () => {
+  await withServer({ script: [{ content: "generated" }], controls: fakeControls(tmpdir()) }, async ({ server }) => {
+    const pending = await json<{ data: Array<{ name: string; status: { status: string } }> }>(
+      await call(server, "/api/mcp"),
+    )
+    expect(pending.data[0]).toMatchObject({ name: "demo", status: { status: "pending" } })
+
+    expect((await call(server, "/api/experimental/mcp/demo/connect", { method: "POST" })).status).toBe(204)
+    const connected = await json<{ data: Array<{ status: { status: string } }> }>(await call(server, "/api/mcp"))
+    expect(connected.data[0]?.status.status).toBe("connected")
+
+    const resources = await json<{ data: { resources: Array<{ uri: string }> } }>(
+      await call(server, "/api/mcp/resource"),
+    )
+    expect(resources.data.resources[0]?.uri).toBe("file:///readme")
+
+    expect(
+      (
+        await call(server, "/api/experimental/mcp/extra", {
+          method: "PUT",
+          body: JSON.stringify({ config: { type: "stdio", command: "echo" } }),
+        })
+      ).status,
+    ).toBe(204)
+    const added = await json<{ data: Array<{ name: string; status: { status: string } }> }>(
+      await call(server, "/api/mcp"),
+    )
+    expect(added.data).toContainEqual({ name: "extra", status: { status: "connected" } })
+    expect((await call(server, "/api/experimental/mcp/extra", { method: "DELETE" })).status).toBe(204)
+    expect((await call(server, "/api/experimental/mcp/extra", { method: "DELETE" })).status).toBe(404)
+
+    expect((await call(server, "/api/experimental/mcp/demo/disconnect", { method: "POST" })).status).toBe(204)
+    const disconnected = await json<{ data: Array<{ status: { status: string } }> }>(await call(server, "/api/mcp"))
+    expect(disconnected.data[0]?.status.status).toBe("pending")
+
+    const generated = await json<{ data: { text: string } }>(
+      await post(server, "/api/experimental/generate", { prompt: "hello" }),
+    )
+    expect(generated.data.text).toBe("generated")
+  })
+})
+
+test("manages PTY and persistent terminal sessions over HTTP", async () => {
+  await withServer({ controls: fakeControls(tmpdir()) }, async ({ server }) => {
+    const created = await post(server, "/api/pty", { title: "demo", command: "cat" })
+    expect(created.status).toBe(201)
+    const { data: pty } = await json<{ data: PtyInfo }>(created)
+    expect(pty.title).toBe("demo")
+
+    const listed = await json<{ data: PtyInfo[] }>(await call(server, "/api/pty"))
+    expect(listed.data.map((item) => item.id)).toContain(pty.id)
+
+    const updated = await json<{ data: PtyInfo }>(
+      await call(server, `/api/pty/${pty.id}`, { method: "PUT", body: JSON.stringify({ title: "renamed" }) }),
+    )
+    expect(updated.data.title).toBe("renamed")
+
+    expect(
+      (await call(server, `/api/pty/${pty.id}/input`, { method: "POST", body: JSON.stringify({ data: "hello\n" }) }))
+        .status,
+    ).toBe(204)
+    const output = await json<{ data: { data: string; offset: number } }>(
+      await call(server, `/api/pty/${pty.id}/output?offset=0`),
+    )
+    expect(output.data).toEqual({ data: "hello\n", offset: 6 })
+
+    const session = await json<{ data: { id: string } }>(await post(server, "/api/session", {}))
+    const terminal = await json<{ data: PtyInfo }>(
+      await post(server, `/api/experimental/session/${session.data.id}/terminal`, {}),
+    )
+    expect(terminal.data.id).toBe(`terminal_${session.data.id}`)
+    const terminals = await json<{ data: PtyInfo[] }>(
+      await call(server, `/api/experimental/session/${session.data.id}/terminal`),
+    )
+    expect(terminals.data).toHaveLength(1)
+
+    expect(
+      (await call(server, `/api/experimental/persistent-pty/terminal_${session.data.id}`, { method: "DELETE" }))
+        .status,
+    ).toBe(204)
+    expect((await call(server, `/api/pty/${pty.id}`, { method: "DELETE" })).status).toBe(204)
+    expect((await call(server, `/api/pty/${pty.id}`)).status).toBe(404)
+  })
 })
 
 test("maps malformed requests and missing routes to typed errors", async () => {

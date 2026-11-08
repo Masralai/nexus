@@ -6,7 +6,7 @@ import type { AgentMode } from "../engine/mode"
 import type { PermissionReply, PermissionRequest } from "../engine/permission"
 import type { SessionExport } from "../engine/session-io"
 import type { SQLiteStore } from "../engine/sqlite"
-import { generateTitle, sessionDisplayTitle, titleFromMessages } from "../engine/title"
+import { maybeGenerateTitle, sessionDisplayTitle } from "../engine/title"
 import type {
   EngineEvent,
   ImagePart,
@@ -46,6 +46,12 @@ export interface CreateSessionInput {
   model?: string
   provider?: string
   title?: string
+}
+
+export interface UpdateSessionInput {
+  title?: string
+  model?: string
+  provider?: string
 }
 
 export interface PromptInput {
@@ -101,6 +107,11 @@ type DurableInput =
   | EngineEvent
   | { type: "messageQueued"; message: Message }
   | { type: "titleUpdated"; title: string }
+  | { type: "sessionCreated"; session: SessionView }
+  | { type: "sessionUpdated"; session: SessionView; patch: UpdateSessionInput }
+  | { type: "sessionImported"; session: SessionView }
+  | { type: "sessionDeleted"; session: SessionView }
+  | { type: "sessionStatus"; status: SessionStatus }
   | { type: "sessionReverted"; messageID?: string; removed: number }
   | { type: "sessionForked"; parentID: string; messageID?: string }
 
@@ -168,6 +179,126 @@ export class SessionService {
     return runtime
   }
 
+  /** Public workspace seam for local resource routes (fs, mcp, pty, plugin, generate). */
+  workspace(cwd?: string, model?: string): Runtime {
+    return this.runtime(resolve(cwd ?? this.defaultCwd), model)
+  }
+
+  defaultWorkspace(): Runtime {
+    return this.workspace()
+  }
+
+  workspaces(): Array<{ directory: string; model?: string }> {
+    return [...this.runtimes.keys()].map((key) => {
+      const [directory, model] = key.split("\0")
+      return { directory, ...(model ? { model } : {}) }
+    })
+  }
+
+  /** Close cached services for one workspace. Its next use boots fresh. */
+  evictWorkspace(cwd: string, model?: string): boolean {
+    const key = `${resolve(cwd)}\0${model ?? ""}`
+    const runtime = this.runtimes.get(key)
+    if (!runtime) return false
+    this.runtimes.delete(key)
+    void runtime.close?.()
+    return true
+  }
+
+  /** Rebuild idle workspace services; active Turns keep their runtime until they finish. */
+  async reloadWorkspaces(): Promise<void> {
+    const busy = new Set<string>()
+    for (const id of this.active.keys()) {
+      const meta = this.store.load(id).meta
+      busy.add(`${resolve(meta.cwd)}\0${meta.model ?? ""}`)
+    }
+    const closing: Runtime[] = []
+    for (const [key, runtime] of this.runtimes) {
+      if (busy.has(key)) continue
+      this.runtimes.delete(key)
+      closing.push(runtime)
+    }
+    await Promise.allSettled(closing.map((runtime) => runtime.close?.()))
+  }
+
+  listProjects(): ReturnType<SQLiteStore["listProjects"]> {
+    return this.store.listProjects()
+  }
+
+  updateProject(
+    id: string,
+    patch: { canonical?: string; name?: string; icon?: Record<string, unknown>; commands?: Record<string, unknown> },
+  ): ReturnType<SQLiteStore["updateProject"]> {
+    try {
+      return this.store.updateProject(id, patch)
+    } catch (error) {
+      if (/not found/.test(error instanceof Error ? error.message : "")) throw notFound(`project ${id} not found`)
+      throw badRequest(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  projectFor(worktree: string): { id: string; directory: string; canonical: string; worktree: string } {
+    const project = this.store.ensureProject(worktree)
+    return {
+      id: project.id,
+      directory: project.worktree,
+      canonical: project.worktree,
+      worktree: project.worktree,
+    }
+  }
+
+  pluginInfo(cwd?: string): Array<Record<string, unknown>> {
+    const runtime = cwd ? this.workspace(cwd) : this.defaultWorkspace()
+    const active = (runtime.plugins?.list() ?? []).map((plugin) => ({
+      id: plugin.name,
+      source: { type: "local", path: "" },
+      features: { server: true },
+      state: { status: "active" },
+    }))
+    const failed = (runtime.pluginErrors ?? []).map((error) => ({
+      source: { type: "local", path: error.path },
+      features: {},
+      state: { status: "failed", error: error.message, ref: error.path },
+    }))
+    return [...active, ...failed]
+  }
+
+  async generate(input: { prompt: string; model?: string }): Promise<string> {
+    if (!input.prompt.trim()) throw badRequest("prompt is required")
+    const runtime = this.defaultWorkspace()
+    const provider = runtime.providerFor?.(input.model) ?? runtime.provider
+    let text = ""
+    for await (const event of provider.stream([{ role: "user", content: input.prompt }], [], {})) {
+      if (event.type === "token") text += event.text
+      else if (event.type === "done" && event.content) text = event.content
+    }
+    return text
+  }
+
+  pendingForms(): Array<Record<string, unknown>> {
+    const forms: Array<Record<string, unknown>> = []
+    for (const [sessionID, pending] of this.questions) {
+      for (const request of pending) {
+        forms.push({
+          id: request.id,
+          sessionID,
+          title: request.questions[0]?.header ?? "Question",
+          fields: request.questions.map((question) => ({
+            type: "string",
+            key: question.header,
+            label: question.question,
+            options: question.options.map((option) => ({
+              value: option.label,
+              label: option.label,
+              ...(option.description ? { description: option.description } : {}),
+            })),
+          })),
+        })
+      }
+    }
+    return forms
+  }
+
   list(query?: string, limit = 50): SessionView[] {
     if (query?.trim()) {
       return this.store
@@ -214,19 +345,40 @@ export class SessionService {
     this.store.create(meta)
     // A fresh Session has no active Turn; do not present it as a crash orphan.
     this.store.setStatus(id, "done")
-    return this.get(id)
+    const view = this.get(id)
+    this.persist(id, { type: "sessionCreated", session: view })
+    return view
+  }
+
+  update(id: string, input: UpdateSessionInput): SessionView {
+    if (!this.store.has(id)) throw notFound(`session ${id} not found`)
+    const patch: UpdateSessionInput = {}
+    if (input.title !== undefined) patch.title = input.title
+    if (input.model !== undefined) {
+      if (!input.model.trim()) throw badRequest("model must be a non-empty string")
+      patch.model = input.model
+    }
+    if (input.provider !== undefined) {
+      if (!input.provider.trim()) throw badRequest("provider must be a non-empty string")
+      patch.provider = input.provider
+    }
+    if (Object.keys(patch).length === 0) throw badRequest("title, model, or provider is required")
+    this.store.update(id, patch)
+    const view = this.get(id)
+    this.persist(id, { type: "sessionUpdated", session: view, patch })
+    return view
   }
 
   rename(id: string, title: string): SessionView {
-    if (!this.store.has(id)) throw notFound(`session ${id} not found`)
-    this.store.rename(id, title)
-    return this.get(id)
+    return this.update(id, { title })
   }
 
   remove(id: string): void {
     if (!this.store.has(id)) throw notFound(`session ${id} not found`)
     if (this.active.has(id)) throw conflict("cannot delete a session with an active Turn")
+    const view = this.get(id)
     this.store.delete(id)
+    this.persist(id, { type: "sessionDeleted", session: view })
   }
 
   revert(id: string, messageID?: string): SessionView {
@@ -268,7 +420,9 @@ export class SessionService {
     } catch (error) {
       throw badRequest(error instanceof Error ? error.message : String(error))
     }
-    return { session: this.get(result.meta.id), imported: result.imported }
+    const session = this.get(result.meta.id)
+    if (result.imported) this.persist(session.id, { type: "sessionImported", session })
+    return { session, imported: result.imported }
   }
 
   prompt(id: string, input: PromptInput): PromptResult {
@@ -291,6 +445,7 @@ export class SessionService {
     this.flushPending(id)
     this.store.append(id, message)
     this.store.setStatus(id, "running")
+    this.persist(id, { type: "sessionStatus", status: "running" })
     this.persist(id, { type: "messageAdded", message })
 
     const controller = new AbortController()
@@ -409,6 +564,7 @@ export class SessionService {
       )
     } finally {
       this.clearPending(id)
+      this.persist(id, { type: "sessionStatus", status: this.store.load(id).status })
     }
     await this.maybeGenerateTitle(id)
   }
@@ -504,16 +660,12 @@ export class SessionService {
   private async maybeGenerateTitle(sessionID: string): Promise<void> {
     const loaded = this.store.load(sessionID)
     const runtime = this.runtime(loaded.meta.cwd, loaded.meta.model)
-    const provider = runtime.titleProvider
-    if (!provider || runtime.cfg.autoTitle === false) return
-    const heuristic = titleFromMessages(loaded.messages)
-    if (!heuristic || loaded.meta.title !== heuristic) return
-    if (!loaded.messages.some((message) => message.role === "assistant" && message.content)) return
     try {
-      const title = await generateTitle(provider, loaded.messages)
-      if (!title || title === loaded.meta.title) return
-      this.store.rename(sessionID, title)
-      this.persist(sessionID, { type: "titleUpdated", title })
+      await maybeGenerateTitle(this.store, sessionID, runtime.titleProvider, {
+        disabled: runtime.cfg.autoTitle === false,
+        model: runtime.cfg.titleModel || runtime.cfg.compactModel,
+        onRename: (title) => this.persist(sessionID, { type: "titleUpdated", title }),
+      })
     } catch {
       // A title is cosmetic; never fail a completed Turn for it.
     }

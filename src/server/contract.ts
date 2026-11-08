@@ -7,7 +7,7 @@
  * duplicating strings.
  */
 
-export type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE"
+export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
 
 export interface RouteDefinition {
   method: HttpMethod
@@ -24,6 +24,42 @@ export const ROUTES = {
   agents: { method: "GET", path: "/api/agent" },
   commands: { method: "GET", path: "/api/command" },
   tools: { method: "GET", path: "/api/tool" },
+
+  location: { method: "GET", path: "/api/location" },
+  locationReload: { method: "POST", path: "/api/location/reload" },
+  debugLocations: { method: "GET", path: "/api/debug/location" },
+  debugEvict: { method: "DELETE", path: "/api/debug/location" },
+
+  fsList: { method: "GET", path: "/api/fs/list" },
+  fsRead: { method: "GET", path: "/api/fs/read/*" },
+  fsFind: { method: "GET", path: "/api/fs/find" },
+  fsWrite: { method: "POST", path: "/api/experimental/fs/write" },
+
+  mcpList: { method: "GET", path: "/api/mcp" },
+  mcpAdd: { method: "PUT", path: "/api/experimental/mcp/:server" },
+  mcpRemove: { method: "DELETE", path: "/api/experimental/mcp/:server" },
+  mcpConnect: { method: "POST", path: "/api/experimental/mcp/:server/connect" },
+  mcpDisconnect: { method: "POST", path: "/api/experimental/mcp/:server/disconnect" },
+  mcpResources: { method: "GET", path: "/api/mcp/resource" },
+
+  ptyList: { method: "GET", path: "/api/pty" },
+  ptyCreate: { method: "POST", path: "/api/pty" },
+  ptyGet: { method: "GET", path: "/api/pty/:ptyID" },
+  ptyUpdate: { method: "PUT", path: "/api/pty/:ptyID" },
+  ptyRemove: { method: "DELETE", path: "/api/pty/:ptyID" },
+  ptyInput: { method: "POST", path: "/api/pty/:ptyID/input" },
+  ptyOutput: { method: "GET", path: "/api/pty/:ptyID/output" },
+  persistentPtyList: { method: "GET", path: "/api/experimental/session/:sessionID/terminal" },
+  persistentPtyCreate: { method: "POST", path: "/api/experimental/session/:sessionID/terminal" },
+  persistentPtyGet: { method: "GET", path: "/api/experimental/persistent-pty/:ptyID" },
+  persistentPtyRemove: { method: "DELETE", path: "/api/experimental/persistent-pty/:ptyID" },
+
+  pluginList: { method: "GET", path: "/api/plugin" },
+  projectList: { method: "GET", path: "/api/project" },
+  projectUpdate: { method: "PATCH", path: "/api/project/:projectID" },
+  referenceList: { method: "GET", path: "/api/reference" },
+  formList: { method: "GET", path: "/api/form" },
+  generate: { method: "POST", path: "/api/experimental/generate" },
 
   sessions: { method: "GET", path: "/api/session" },
   sessionCreate: { method: "POST", path: "/api/session" },
@@ -48,12 +84,15 @@ export const ROUTES = {
 
 export type RouteName = keyof typeof ROUTES
 
-/** Build a concrete path from a route name and its `:params`. */
+/** Build a concrete path from a route name and its `:params` or trailing `*`. */
 export function routePath(name: RouteName, params: Record<string, string | number> = {}): string {
-  return ROUTES[name].path.replace(/:([A-Za-z0-9_]+)/g, (_, key: string) => {
-    const value = params[key]
-    if (value === undefined) throw new Error(`route ${name} requires param ${key}`)
-    return encodeURIComponent(String(value))
+  return ROUTES[name].path.replace(/:([A-Za-z0-9_]+)|\*/g, (match, key?: string) => {
+    const param = key ?? "*"
+    const value = params[param]
+    if (value === undefined) throw new Error(`route ${name} requires param ${param}`)
+    return match === "*"
+      ? String(value).split("/").map(encodeURIComponent).join("/")
+      : encodeURIComponent(String(value))
   })
 }
 

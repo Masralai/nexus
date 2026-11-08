@@ -59,7 +59,15 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
     service,
     token,
     config: options.config,
-    info: () => ({ version, url, pid: process.pid, startedAt }),
+    defaultCwd,
+    info: () => ({
+      version,
+      url,
+      urls: [url],
+      pid: process.pid,
+      startedAt,
+      paths: { tmp: process.env.TMPDIR ?? "/tmp" },
+    }),
   })
 
   const server = Bun.serve({
