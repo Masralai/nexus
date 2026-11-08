@@ -1,7 +1,5 @@
 node_modules/
-CONTEXT.md
-AGENTS.md
-SPEC.md
+*.md
 .nexus.json
 .nexus/
 dist/
