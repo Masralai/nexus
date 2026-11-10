@@ -12,16 +12,20 @@ export interface Skill {
 
 const MAX_BODY = 12_000
 
-/** Default skill roots (first match wins on id collision). */
-export function defaultSkillRoots(): string[] {
+/** Skill roots for a workspace. Project wins over home on id collision. */
+export function skillRoots(cwd = process.cwd()): string[] {
   const home = homedir()
-  // Project wins over home (last listed loses on id collision — we insert project first).
   return [
-    join(process.cwd(), ".agents", "skills"),
+    join(cwd, ".agents", "skills"),
     join(home, ".agents", "skills"),
     join(home, ".claude", "skills"),
     join(home, ".cursor", "skills-cursor"),
   ]
+}
+
+/** Default skill roots (first match wins on id collision). */
+export function defaultSkillRoots(): string[] {
+  return skillRoots()
 }
 
 function stripQuotes(v: string): string {

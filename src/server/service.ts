@@ -19,6 +19,7 @@ import type {
   StoredEvent,
 } from "../engine/types"
 import { getModelInfo, type ModelInfo } from "../providers/catalog"
+import type { Skill } from "../skills"
 import { badRequest, conflict, notFound } from "./errors"
 
 export interface WireEvent {
@@ -59,11 +60,15 @@ export interface PromptInput {
   images?: ImagePart[]
   autoApprove?: boolean
   mode?: AgentMode
+  skills?: Skill[]
+  agent?: { prompt?: string; tools?: string[]; mode?: AgentMode }
 }
 
 export interface PromptResult {
   sessionID: string
   message: Message
+  /** Global cursor after the prompt was persisted; subscribe from here. */
+  cursor: number
   /** True when a Turn was active and the input was queued for steering. */
   queued?: boolean
 }
@@ -440,7 +445,7 @@ export class SessionService {
         ...(input.mode ? { mode: input.mode } : {}),
       })
       this.persist(id, { type: "messageQueued", message })
-      return { sessionID: id, message, queued: true }
+      return { sessionID: id, message, cursor: this.lastCursor(), queued: true }
     }
     this.flushPending(id)
     this.store.append(id, message)
@@ -454,7 +459,7 @@ export class SessionService {
     turn.promise = this.execute(id, controller, input).finally(() => {
       if (this.active.get(id) === turn) this.active.delete(id)
     })
-    return { sessionID: id, message }
+    return { sessionID: id, message, cursor: this.lastCursor() }
   }
 
   interrupt(id: string): boolean {
@@ -547,6 +552,8 @@ export class SessionService {
         signal: controller.signal,
         autoApprove: input.autoApprove,
         mode: input.mode,
+        ...(input.skills ? { skills: input.skills } : {}),
+        ...(input.agent ? { agent: input.agent } : {}),
         askPermission: (request) => this.askPermission(id, request),
         askQuestion: (questions, requestID) => this.askQuestion(id, questions, requestID),
       })

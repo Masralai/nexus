@@ -30,6 +30,9 @@ export interface StartServerOptions {
   stateDir?: string
   /** Override the single-use WebSocket ticket store (tests, shared process). */
   tickets?: PtyTicketStore
+  /** Override global config and credentials paths (tests, isolated clients). */
+  configPath?: string
+  credentialsPath?: string
 }
 
 export interface ServerHandle {
@@ -88,6 +91,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
     config: options.config,
     defaultCwd,
     tickets,
+    configPath: options.configPath,
+    credentialsPath: options.credentialsPath,
     info: () => ({
       version,
       url,

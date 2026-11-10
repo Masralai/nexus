@@ -52,9 +52,10 @@ test("SDK client drives a Turn over HTTP", async () => {
     expect(info.version).toBe("0.1.0")
     const session = (await client.createSession({ title: "sdk" })) as { id: string; title: string }
     expect(session.title).toBe("sdk")
-    await client.prompt(session.id, { text: "hi" })
+    const prompt = await client.prompt(session.id, { text: "hi" })
+    expect(prompt.cursor).toBeGreaterThan(0)
     let done = false
-    for await (const event of client.events({ sessionID: session.id })) {
+    for await (const event of client.events({ sessionID: session.id, after: prompt.cursor })) {
       if (event.type === "runComplete") {
         done = true
         break

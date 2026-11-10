@@ -4,6 +4,9 @@ import { runTurn } from "../cli/launch"
 import type { AgentMode } from "../engine/mode"
 import type { Message } from "../engine/types"
 import type { Skill } from "../skills"
+import { NexusClient } from "../sdk/client"
+import { startServer } from "../server/server"
+import { discoverService } from "../server/state"
 import { App } from "./app"
 import { Shell } from "./shell"
 
@@ -61,6 +64,14 @@ export function runTUI(opts: TUIRunOptions): void {
   )
 }
 
-export function runShell(): void {
-  render(<Shell />, { exitOnCtrlC: false })
+export async function runShell(): Promise<void> {
+  const existing = discoverService()
+  const embedded = existing ? undefined : await startServer({ port: 0 })
+  const client = new NexusClient({
+    url: existing?.url ?? embedded!.url,
+    token: existing?.password ?? embedded!.token,
+  })
+  const instance = render(<Shell client={client} />, { exitOnCtrlC: false })
+  await instance.waitUntilExit()
+  await embedded?.stop()
 }

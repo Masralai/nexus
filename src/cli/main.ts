@@ -97,7 +97,7 @@ exit codes: 0 done, 1 error, 2 aborted, 3 step limit`,
     )
     break
   case undefined:
-    runShell()
+    await runShell()
     break
   default:
     console.log(`unknown command: ${cmd}`)

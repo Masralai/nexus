@@ -2,19 +2,21 @@ import { randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import type { NexusConfig } from "../cli/config"
-import { hasResolvableKey, loadConfig } from "../cli/config"
+import { hasResolvableKey, loadConfig, saveConfig } from "../cli/config"
+import { setCredential } from "../cli/credentials"
 import { advertiseTools, type AgentMode } from "../engine/mode"
 import type { PermissionReply } from "../engine/permission"
 import type { ImagePart, PtyCreateOptions, PtyInfo, QuestionAnswer, ToolDefinition } from "../engine/types"
 import { getModelInfo, listModels } from "../providers/catalog"
 import { PRESETS, getPreset, type Preset } from "../providers/presets"
+import { discoverSkills, skillRoots } from "../skills"
 import { defaultTools } from "../tools"
 import { allFiles } from "../tools/walk"
 import { authorized } from "./auth"
 import { ROUTES, type RouteName } from "./contract"
 import { ApiError, badGateway, badRequest, notFound, unavailable, unauthorized } from "./errors"
 import type { PtyTicketStore } from "./pty-ticket"
-import type { SessionService, SessionView } from "./service"
+import type { PromptInput, SessionService, SessionView } from "./service"
 import { eventStream } from "./sse"
 
 const CORS_HEADERS = {
@@ -70,13 +72,8 @@ function errorResponse(error: unknown): Response {
 }
 
 function withCors(response: Response): Response {
-  const headers = new Headers(response.headers)
-  for (const [key, value] of Object.entries(CORS_HEADERS)) headers.set(key, value)
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  })
+  for (const [key, value] of Object.entries(CORS_HEADERS)) response.headers.set(key, value)
+  return response
 }
 
 async function body(req: Request): Promise<Record<string, unknown>> {
@@ -345,6 +342,9 @@ export interface RouterOptions {
   defaultCwd?: string
   info?: () => RouterInfo
   tickets?: PtyTicketStore
+  /** Override global config and credentials paths for isolated clients/tests. */
+  configPath?: string
+  credentialsPath?: string
 }
 
 type Handler = (input: {
@@ -386,6 +386,7 @@ function match(pathname: string, pattern: string): Record<string, string> | unde
  */
 export function createRouter(options: RouterOptions): (req: Request) => Promise<Response> {
   const cfg = options.config ?? loadConfig()
+  const liveCfg = () => options.config ?? loadConfig()
   const service = options.service
   const defaultCwd = options.defaultCwd ?? process.cwd()
 
@@ -400,26 +401,63 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
         },
       ),
 
-    config: () => data(redact(cfg)),
+    config: () => data(redact(liveCfg())),
 
-    providers: () => data(PRESETS.map((preset) => providerInfo(preset, cfg))),
+    configUpdate: async ({ req }) => {
+      const input = await body(req)
+      const patch: Partial<NexusConfig> = {}
+      const model = stringField(input, "model", false)
+      if (model !== undefined && !model.trim()) throw badRequest("model must not be empty")
+      const presetID = stringField(input, "preset", false)
+      const provider = stringField(input, "provider", false)
+      const baseUrl = stringField(input, "baseUrl", false)
+      const apiKey = stringField(input, "apiKey", false)
+      if (model) patch.model = model.trim()
+      if (presetID) {
+        const preset = getPreset(presetID)
+        patch.preset = presetID
+        patch.provider = preset?.adapter ?? provider ?? "openai-compatible"
+        patch.baseUrl = preset?.baseUrl ?? baseUrl
+        if (!patch.model && preset?.suggestedModels.length) patch.model = preset.suggestedModels[0]
+      } else if (provider) patch.provider = provider
+      if (baseUrl !== undefined) patch.baseUrl = baseUrl
+      if (apiKey) {
+        const id = presetID ?? options.config?.preset ?? loadConfig().preset
+        setCredential(
+          id,
+          { apiKey, ...(baseUrl ? { baseUrl } : patch.baseUrl ? { baseUrl: patch.baseUrl } : {}) },
+          options.credentialsPath,
+        )
+      }
+      if (Object.keys(patch).length > 0) saveConfig(patch, options.configPath)
+      if (apiKey || Object.keys(patch).length > 0) await service.reloadWorkspaces()
+      return noContent()
+    },
+
+    providers: () => data(PRESETS.map((preset) => providerInfo(preset, liveCfg()))),
 
     provider: ({ params }) => {
       const preset = getPreset(params.providerID)
       if (!preset) throw notFound(`provider ${params.providerID} not found`)
-      return data(providerInfo(preset, cfg))
+      return data(providerInfo(preset, liveCfg()))
     },
 
     models: () => data(listModels()),
 
     modelDefault: () => {
-      if (!cfg.model) return data(null)
-      return data(getModelInfo(cfg.model))
+      const model = liveCfg().model
+      if (!model) return data(null)
+      return data(getModelInfo(model))
     },
 
-    agents: () => data(agentList(cfg)),
+    agents: () => data(agentList(liveCfg())),
 
-    commands: () => data(commandList(cfg)),
+    commands: () => data(commandList(liveCfg())),
+
+    skills: ({ url }) => {
+      const directory = locationDirectory(url, defaultCwd)
+      return located(directory, discoverSkills(skillRoots(directory)))
+    },
 
     tools: ({ url }) => data(toolList(parseMode(url.searchParams.get("mode")))),
 
@@ -449,12 +487,55 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
       return located(base, listDirectory(base, url.searchParams.get("path") ?? undefined))
     },
 
-    fsRead: ({ url, params }) => {
+    fsRead: ({ req, url, params }) => {
       const base = locationDirectory(url, defaultCwd)
       const full = resolve(base, params["*"] ?? "")
       if (!existsSync(full)) throw notFound(`file ${full} not found`)
-      if (!statSync(full).isFile()) throw badRequest(`not a file: ${full}`)
-      return new Response(Bun.file(full), { headers: { "cache-control": "no-store" } })
+      const stat = statSync(full)
+      if (!stat.isFile()) throw badRequest(`not a file: ${full}`)
+      const etag = `"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`
+      const headers: Record<string, string> = {
+        etag,
+        "accept-ranges": "bytes",
+        "cache-control": "no-cache",
+      }
+      if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers })
+      const range = req.headers.get("range")
+      if (range) {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim())
+        if (!match) {
+          return new Response(null, {
+            status: 416,
+            headers: { ...headers, "content-range": `bytes */${stat.size}` },
+          })
+        }
+        const hasStart = match[1] !== ""
+        const hasEnd = match[2] !== ""
+        let start = hasStart ? Number(match[1]) : Math.max(0, stat.size - Number(match[2]))
+        let end = hasStart && hasEnd ? Number(match[2]) : stat.size - 1
+        if (!hasStart && !hasEnd) {
+          return new Response(null, {
+            status: 416,
+            headers: { ...headers, "content-range": `bytes */${stat.size}` },
+          })
+        }
+        end = Math.min(end, stat.size - 1)
+        if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start > end || start >= stat.size) {
+          return new Response(null, {
+            status: 416,
+            headers: { ...headers, "content-range": `bytes */${stat.size}` },
+          })
+        }
+        return new Response(Bun.file(full).slice(start, end + 1), {
+          status: 206,
+          headers: {
+            ...headers,
+            "content-range": `bytes ${start}-${end}/${stat.size}`,
+            "content-length": String(end - start + 1),
+          },
+        })
+      }
+      return new Response(Bun.file(full), { headers })
     },
 
     fsFind: ({ url }) => {
@@ -563,6 +644,21 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
       return located(directory, { resources: await mcp.resources(), templates: [] })
     },
 
+    mcpResourceRead: async ({ url, params }) => {
+      const directory = locationDirectory(url, defaultCwd)
+      const uri = url.searchParams.get("uri")
+      if (!uri) throw badRequest("uri is required")
+      const mcp = service.workspace(directory).controls?.mcp
+      if (!mcp) throw unavailable("MCP control is unavailable")
+      try {
+        return located(directory, await mcp.readResource(params.server, uri))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (/not found|unknown server/i.test(message)) throw notFound(message)
+        throw error
+      }
+    },
+
     ptyList: ({ url }) => located(locationDirectory(url, defaultCwd), managedPty(service).list()),
 
     ptyCreate: async ({ req, url }) => {
@@ -658,6 +754,36 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
       return data(info ? [info] : [])
     },
 
+    persistentPtyRead: ({ url, params }) => {
+      const control = managedPty(service)
+      const ptyID = `terminal_${params.sessionID}`
+      const info = control.get(ptyID)
+      if (!info || !control.output) return data(null)
+      const lines = positiveInt(url.searchParams.get("lines"), 0, 65_535)
+      let text = control.output(ptyID, 0).data
+      if (lines > 0) {
+        const rows = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n")
+        text = rows.slice(-lines).join("\n")
+      }
+      return data({
+        ptyID,
+        title: info.title,
+        cwd: info.cwd,
+        foregroundProcess: null,
+        screen: { text, cols: 120, rows: 40, cursor: { x: 0, y: 0 } },
+      })
+    },
+
+    persistentPtyShutdown: () => {
+      const control = managedPty(service)
+      for (const item of control.list?.() ?? []) {
+        if (item.id.startsWith("terminal_")) control.remove?.(item.id)
+      }
+      return noContent()
+    },
+
+    persistentPtyHandoff: () => data({ handoff: null }),
+
     persistentPtyCreate: async ({ req, params }) => {
       const session = service.get(params.sessionID)
       const input = await body(req)
@@ -681,6 +807,33 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
       return data(info)
     },
 
+    persistentPtySnapshot: ({ url, params }) => {
+      const info = managedPty(service).get(params.ptyID)
+      if (!info) throw notFound(`pty ${params.ptyID} not found`)
+      const output = managedPty(service).output?.(params.ptyID, 0)
+      return located(locationDirectory(url, defaultCwd), {
+        info,
+        text: output?.data ?? "",
+        checkpoint: "",
+        cursor: { x: 0, y: 0 },
+      })
+    },
+
+    persistentPtyUpdate: async ({ req, params }) => {
+      const input = await body(req)
+      const title = stringField(input, "title", false)
+      const size = input.size as { rows?: unknown; cols?: unknown } | undefined
+      if (size !== undefined && (!size || typeof size !== "object")) throw badRequest("size must be an object")
+      const rows = typeof size?.rows === "number" && size.rows > 0 ? Math.floor(size.rows) : undefined
+      const cols = typeof size?.cols === "number" && size.cols > 0 ? Math.floor(size.cols) : undefined
+      try {
+        return data(managedPty(service).update(params.ptyID, { ...(title ? { title } : {}), rows, cols }))
+      } catch (error) {
+        if (/not found/.test(error instanceof Error ? error.message : "")) throw notFound(`pty ${params.ptyID} not found`)
+        throw error
+      }
+    },
+
     persistentPtyRemove: ({ params }) => {
       const control = managedPty(service)
       if (!control.get(params.ptyID)) throw notFound(`pty ${params.ptyID} not found`)
@@ -689,6 +842,18 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
     },
 
     pluginList: ({ url }) => data(service.pluginInfo(locationDirectory(url, defaultCwd))),
+
+    pluginCheck: async ({ url }) => {
+      const directory = locationDirectory(url, defaultCwd)
+      await service.reloadWorkspaces()
+      return data(service.pluginInfo(directory))
+    },
+
+    pluginUpdate: async ({ url }) => {
+      const directory = locationDirectory(url, defaultCwd)
+      await service.reloadWorkspaces()
+      return data(service.pluginInfo(directory))
+    },
 
     projectList: () => data(service.listProjects().map(projectView)),
 
@@ -814,13 +979,21 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
       const autoApprove = input.autoApprove === true || input.yes === true
       const modeRaw = stringField(input, "mode", false)
       const mode = modeRaw ? parseMode(modeRaw) : undefined
+      const skills = input.skills
+      if (skills !== undefined && !Array.isArray(skills)) throw badRequest("skills must be an array")
+      const agent = input.agent
+      if (agent !== undefined && (!agent || typeof agent !== "object" || Array.isArray(agent))) {
+        throw badRequest("agent must be an object")
+      }
       const result = service.prompt(params.sessionID, {
         text: text!,
         ...(images ? { images: images as ImagePart[] } : {}),
         ...(autoApprove ? { autoApprove: true } : {}),
         ...(mode ? { mode } : {}),
+        ...(skills ? { skills: skills as PromptInput["skills"] } : {}),
+        ...(agent ? { agent: agent as PromptInput["agent"] } : {}),
       })
-      return data(result.message, result.queued ? 202 : 200)
+      return data({ ...result.message, cursor: result.cursor }, result.queued ? 202 : 200)
     },
 
     interrupt: ({ params }) => {

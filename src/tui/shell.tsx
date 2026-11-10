@@ -1,20 +1,12 @@
 import { useEffect, useRef, useState } from "react"
 import { Box, Text, useApp, useInput, useStdout } from "ink"
-import { randomUUID } from "node:crypto"
-import {
-  applyPresetToConfig,
-  hasResolvableKey,
-  loadConfig,
-  saveConfig,
-} from "../cli/config"
-import { setCredential } from "../cli/credentials"
+import { hasResolvableKey, loadConfig } from "../cli/config"
 import { expandCommand, findAgent, findCommand, configuredCommands, type ResolvedAgent } from "../cli/commands"
-import { launchRuntime, runTurn, type Runtime } from "../cli/launch"
-import { openSessionStore } from "../engine/store"
 import type { Message } from "../engine/types"
 import type { AgentMode } from "../engine/mode"
+import { NexusClient } from "../sdk/client"
 import { PRESETS, getPreset, otherPreset } from "../providers/presets"
-import { discoverSkills, findSkill, type Skill } from "../skills"
+import { findSkill, type Skill } from "../skills"
 import { copyToClipboard } from "./clipboard"
 import { Composer } from "./composer"
 import { Footer } from "./footer"
@@ -39,6 +31,7 @@ import {
 import type { SelectionAnchor } from "./present"
 import { HELP, filterSlashCommands, parseSlash, parseSlashArgs } from "./slash"
 import { Stream } from "./stream"
+import { runServerTurn } from "./server-turn"
 import { reduceEvent, initialTUIState, settleTurnView } from "./state"
 import type { TUIState } from "./state"
 import { theme } from "./theme"
@@ -55,13 +48,12 @@ type Overlay =
   | { kind: "line"; label: string; mask?: boolean; then: (v: string) => void }
   | { kind: "permission"; name: string; reason: string; input: unknown; resolve: (ok: boolean) => void }
 
-export function Shell() {
+export function Shell({ client }: { client: NexusClient }) {
   const { exit } = useApp()
   const { stdout } = useStdout()
-  const [store] = useState(() => openSessionStore())
-  const [sessionId, setSessionId] = useState(String(randomUUID()))
+  const [sessionId, setSessionId] = useState("")
+  const sessionRef = useRef("")
   const [messages, setMessages] = useState<Message[]>([])
-  const [created, setCreated] = useState(false)
   const [chrome, setChrome] = useState(() => ({ ...initialChrome(), history: loadHistory() }))
   const [busy, setBusy] = useState(false)
   const [busySince, setBusySince] = useState<number | undefined>(undefined)
@@ -76,20 +68,15 @@ export function Shell() {
   const [selAnchor, setSelAnchor] = useState<SelectionAnchor | undefined>()
   const [selActive, setSelActive] = useState<SelectionAnchor | undefined>()
   const selDragging = useRef(false)
-  const runtimeRef = useRef<{ key: string; runtime: Runtime } | null>(null)
-
-  // One runtime per workspace/model so a PTY, MCP clients and background jobs
-  // survive between Turns in the same shell.
-  function runtimeForWorkspace(model?: string): Runtime {
-    const key = `${process.cwd()}\0${model ?? loadConfig().model}`
-    if (runtimeRef.current?.key === key) return runtimeRef.current.runtime
-    if (runtimeRef.current) void runtimeRef.current.runtime.close?.()
-    const runtime = launchRuntime({ store, ...(model ? { model } : {}) })
-    runtimeRef.current = { key, runtime }
-    return runtime
-  }
 
   const pushLog = (line: string) => setLog((l) => [...l, line])
+
+  function abortTurn() {
+    const sid = sessionRef.current
+    acRef.current?.abort()
+    if (sid) void client.interrupt(sid).catch(() => {})
+    pushLog("aborted turn")
+  }
 
   const needKey = !hasResolvableKey()
   const slashMatches = filterSlashCommands(chrome.input)
@@ -107,7 +94,7 @@ export function Shell() {
     sessionId,
     mode,
     skillNames: activeSkills.map((s) => s.name),
-    connected: hasResolvableKey(),
+    connected: true,
     busy,
     overlay: overlay?.kind ?? null,
     chrome,
@@ -148,13 +135,6 @@ export function Shell() {
   }
 
   useEffect(() => cancelSmooth, [])
-
-  useEffect(() => {
-    return () => {
-      void runtimeRef.current?.runtime.close?.()
-      runtimeRef.current = null
-    }
-  }, [])
 
   useEffect(() => {
     if (overlay) cancelSmooth()
@@ -229,11 +209,24 @@ export function Shell() {
                     mask: true,
                     then: (apiKey) => {
                       const preset = otherPreset(customId.trim() || "custom", baseUrl.trim())
-                      setCredential(preset.id, { apiKey, baseUrl: preset.baseUrl })
-                      applyPresetToConfig(preset)
-                      setOverlay(null)
-                      pushLog(`connected: ${preset.id}`)
-                      setLive((s) => ({ ...s, status: { ...s.status, model: loadConfig().model || "?" } }))
+                      const model = loadConfig().model
+                      void client
+                        .updateConfig({
+                          preset: preset.id,
+                          provider: preset.adapter,
+                          baseUrl: preset.baseUrl,
+                          apiKey,
+                          ...(model ? { model } : {}),
+                        })
+                        .then(() => {
+                          setOverlay(null)
+                          pushLog(`connected: ${preset.id}`)
+                          setLive((s) => ({ ...s, status: { ...s.status, model: model || "?" } }))
+                        })
+                        .catch((error) => {
+                          setOverlay(null)
+                          pushLog(`connect failed: ${error instanceof Error ? error.message : String(error)}`)
+                        })
                     },
                   })
                 },
@@ -254,14 +247,23 @@ export function Shell() {
               setOverlay(null)
               return
             }
-            setCredential(preset.id, { apiKey: key, baseUrl: preset.baseUrl })
-            applyPresetToConfig(preset)
-            setOverlay(null)
-            pushLog(`connected: ${preset.label}`)
-            setLive((s) => ({
-              ...s,
-              status: { ...s.status, model: loadConfig().model || preset.suggestedModels[0] || "?" },
-            }))
+            const model = loadConfig().model || preset.suggestedModels[0] || ""
+            void client
+              .updateConfig({
+                preset: preset.id,
+                apiKey: key,
+                ...(preset.baseUrl ? { baseUrl: preset.baseUrl } : {}),
+                ...(model ? { model } : {}),
+              })
+              .then(() => {
+                setOverlay(null)
+                pushLog(`connected: ${preset.label}`)
+                setLive((s) => ({ ...s, status: { ...s.status, model: model || "?" } }))
+              })
+              .catch((error) => {
+                setOverlay(null)
+                pushLog(`connect failed: ${error instanceof Error ? error.message : String(error)}`)
+              })
           },
         })
       },
@@ -282,18 +284,33 @@ export function Shell() {
             kind: "line",
             label: "model id: ",
             then: (m) => {
-              saveConfig({ model: m.trim() })
-              setOverlay(null)
-              pushLog(`model: ${m.trim()}`)
-              setLive((s) => ({ ...s, status: { ...s.status, model: m.trim() } }))
+              const model = m.trim()
+              void client
+                .updateConfig({ model })
+                .then(() => {
+                  setOverlay(null)
+                  pushLog(`model: ${model}`)
+                  setLive((s) => ({ ...s, status: { ...s.status, model } }))
+                })
+                .catch((error) => {
+                  setOverlay(null)
+                  pushLog(`model update failed: ${error instanceof Error ? error.message : String(error)}`)
+                })
             },
           })
           return
         }
-        saveConfig({ model: id })
-        setOverlay(null)
-        pushLog(`model: ${id}`)
-        setLive((s) => ({ ...s, status: { ...s.status, model: id } }))
+        void client
+          .updateConfig({ model: id })
+          .then(() => {
+            setOverlay(null)
+            pushLog(`model: ${id}`)
+            setLive((s) => ({ ...s, status: { ...s.status, model: id } }))
+          })
+          .catch((error) => {
+            setOverlay(null)
+            pushLog(`model update failed: ${error instanceof Error ? error.message : String(error)}`)
+          })
       },
     })
   }
@@ -307,39 +324,44 @@ export function Shell() {
   }
 
   function startSkillFlow() {
-    const catalog = discoverSkills()
-    if (catalog.length === 0) {
-      pushLog("no skills found (~/.agents/skills, ~/.claude/skills, ~/.cursor/skills-cursor, .agents/skills)")
-      return
-    }
-    const activeIds = new Set(activeSkills.map((s) => s.id))
-    setOverlay({
-      kind: "picker",
-      title: `Activate skill (${activeIds.size} active)`,
-      searchable: true,
-      items: [
-        ...catalog.map((s) => ({
-          id: s.id,
-          label: activeIds.has(s.id)
-            ? `${s.name} ✓${s.description ? ` — ${s.description.slice(0, 50)}` : ""}`
-            : s.description
-              ? `${s.name} — ${s.description.slice(0, 60)}`
-              : s.name,
-          searchText: `${s.id} ${s.name} ${s.description} ${s.path}`,
-        })),
-        ...(activeSkills.length ? [{ id: "__clear__", label: "Clear active skills" }] : []),
-      ],
-      then: (id) => {
-        setOverlay(null)
-        if (id === "__clear__") {
-          setActiveSkills([])
-          pushLog("skills cleared")
+    void client
+      .skills()
+      .then((list) => {
+        const catalog = list as unknown as Skill[]
+        if (catalog.length === 0) {
+          pushLog("no skills found (~/.agents/skills, ~/.claude/skills, ~/.cursor/skills-cursor, .agents/skills)")
           return
         }
-        const skill = catalog.find((s) => s.id === id)
-        if (skill) activateSkill(skill)
-      },
-    })
+        const activeIds = new Set(activeSkills.map((s) => s.id))
+        setOverlay({
+          kind: "picker",
+          title: `Activate skill (${activeIds.size} active)`,
+          searchable: true,
+          items: [
+            ...catalog.map((s) => ({
+              id: s.id,
+              label: activeIds.has(s.id)
+                ? `${s.name} ✓${s.description ? ` — ${s.description.slice(0, 50)}` : ""}`
+                : s.description
+                  ? `${s.name} — ${s.description.slice(0, 60)}`
+                  : s.name,
+              searchText: `${s.id} ${s.name} ${s.description} ${s.path}`,
+            })),
+            ...(activeSkills.length ? [{ id: "__clear__", label: "Clear active skills" }] : []),
+          ],
+          then: (id) => {
+            setOverlay(null)
+            if (id === "__clear__") {
+              setActiveSkills([])
+              pushLog("skills cleared")
+              return
+            }
+            const skill = catalog.find((s) => s.id === id)
+            if (skill) activateSkill(skill)
+          },
+        })
+      })
+      .catch((error) => pushLog(`skill discovery failed: ${error instanceof Error ? error.message : String(error)}`))
   }
 
   function handleSkillCommand(args: string) {
@@ -352,83 +374,117 @@ export function Shell() {
       pushLog("skills cleared")
       return
     }
-    const catalog = discoverSkills()
-    const skill = findSkill(catalog, args)
-    if (!skill) {
-      pushLog(`unknown skill: ${args} — try /skill`)
-      return
-    }
-    activateSkill(skill)
+    void client
+      .skills()
+      .then((list) => {
+        const skill = findSkill(list as unknown as Skill[], args)
+        if (!skill) {
+          pushLog(`unknown skill: ${args} — try /skill`)
+          return
+        }
+        activateSkill(skill)
+      })
+      .catch((error) => pushLog(`skill discovery failed: ${error instanceof Error ? error.message : String(error)}`))
   }
 
   function startAgentFlow() {
-    const cfg = loadConfig()
-    const agents = Object.keys(cfg.agents ?? {})
-    if (agents.length === 0) {
-      pushLog("no custom agents configured under agents in .nexus.json")
-      return
-    }
-    setOverlay({
-      kind: "picker",
-      title: "Select custom agent (/agent)",
-      searchable: true,
-      items: [
-        ...agents.map((id) => ({
-          id,
-          label: `${id}${cfg.agents?.[id]?.description ? ` — ${cfg.agents[id].description}` : ""}`,
-        })),
-        ...(activeAgent ? [{ id: "__none__", label: "Clear custom agent" }] : []),
-      ],
-      then: (id) => {
-        setOverlay(null)
-        if (id === "__none__") {
-          setActiveAgent(null)
-          pushLog("custom agent cleared")
+    void client
+      .agents()
+      .then((list) => {
+        const custom = list.filter((agent) => !agent.builtin) as Array<{
+          id: string
+          description?: string
+          mode?: "plan" | "build"
+          model?: string
+          prompt?: string
+          tools?: string[]
+        }>
+        if (custom.length === 0) {
+          pushLog("no custom agents configured under agents in .nexus.json")
           return
         }
-        const agent = findAgent(cfg, id)
-        if (!agent) return
-        setActiveAgent(agent)
-        if (agent.config.mode) setMode(agent.config.mode)
-        pushLog(`agent: ${agent.id}`)
-      },
-    })
+        setOverlay({
+          kind: "picker",
+          title: "Select custom agent (/agent)",
+          searchable: true,
+          items: [
+            ...custom.map((agent) => ({
+              id: agent.id,
+              label: `${agent.id}${agent.description ? ` — ${agent.description}` : ""}`,
+            })),
+            ...(activeAgent ? [{ id: "__none__", label: "Clear custom agent" }] : []),
+          ],
+          then: (id) => {
+            setOverlay(null)
+            if (id === "__none__") {
+              setActiveAgent(null)
+              pushLog("custom agent cleared")
+              return
+            }
+            const found = custom.find((agent) => agent.id === id)
+            if (!found) return
+            const agent: ResolvedAgent = {
+              id: found.id,
+              config: {
+                ...(found.description ? { description: found.description } : {}),
+                ...(found.mode ? { mode: found.mode } : {}),
+                ...(found.model ? { model: found.model } : {}),
+                ...(found.prompt ? { prompt: found.prompt } : {}),
+                ...(found.tools ? { tools: found.tools } : {}),
+              },
+            }
+            setActiveAgent(agent)
+            if (agent.config.mode) setMode(agent.config.mode)
+            pushLog(`agent: ${agent.id}`)
+          },
+        })
+      })
+      .catch((error) => pushLog(`agent list failed: ${error instanceof Error ? error.message : String(error)}`))
   }
 
   function startResumeFlow() {
-    const sessions = store.listWithTitles()
-    if (sessions.length === 0) {
-      pushLog("no sessions to resume")
-      return
-    }
-    setOverlay({
-      kind: "picker",
-      title: "Resume session",
-      searchable: true,
-      items: sessions.map((s) => ({
-        id: s.meta.id,
-        label: s.title ? `${s.title} — ${s.meta.model} · ${s.meta.createdAt}` : `${s.meta.id.slice(0, 8)}… ${s.meta.model} ${s.meta.createdAt}`,
-        searchText: `${s.title} ${s.meta.id} ${s.meta.model} ${s.meta.createdAt}`,
-      })),
-      then: (id) => {
-        const loaded = store.load(id)
-        setSessionId(String(loaded.meta.id))
-        setMessages(loaded.messages)
-        setCreated(true)
-        setOverlay(null)
-        setLog([])
-        setChrome((c) => ({ ...initialChrome(), history: c.history.length ? c.history : loadHistory() }))
-        setLive(initialTUIState(loaded.meta.model))
-      },
-    })
+    void (async () => {
+      const sessions = (await client.listSessions()) as Array<{
+        id: string
+        title?: string
+        model: string
+        createdAt: string
+      }>
+      if (sessions.length === 0) {
+        pushLog("no sessions to resume")
+        return
+      }
+      setOverlay({
+        kind: "picker",
+        title: "Resume session",
+        searchable: true,
+        items: sessions.map((s) => ({
+          id: s.id,
+          label: s.title ? `${s.title} — ${s.model} · ${s.createdAt}` : `${s.id.slice(0, 8)}… ${s.model} ${s.createdAt}`,
+          searchText: `${s.title ?? ""} ${s.id} ${s.model} ${s.createdAt}`,
+        })),
+        then: (id) => {
+          void (async () => {
+            try {
+              const loaded = (await client.getSession(id)) as { model: string }
+              const loadedMessages = (await client.messages(id)) as Message[]
+              sessionRef.current = id
+              setSessionId(id)
+              setMessages(loadedMessages)
+              setOverlay(null)
+              setLog([])
+              setChrome((c) => ({ ...initialChrome(), history: c.history.length ? c.history : loadHistory() }))
+              setLive(initialTUIState(loaded.model))
+            } catch (error) {
+              pushLog(`resume failed: ${error instanceof Error ? error.message : String(error)}`)
+            }
+          })()
+        },
+      })
+    })().catch((error) => pushLog(`resume failed: ${error instanceof Error ? error.message : String(error)}`))
   }
 
   async function runTurnUi(userText: string, opts: { agent?: ResolvedAgent } = {}) {
-    if (!hasResolvableKey()) {
-      pushLog("not connected — run /key")
-      startKeyFlow()
-      return
-    }
     const selectedAgent = opts.agent ?? activeAgent ?? undefined
     const agent = selectedAgent
       ? {
@@ -437,61 +493,90 @@ export function Shell() {
           ...(selectedAgent.config.mode ? { mode: selectedAgent.config.mode } : {}),
         }
       : undefined
-    const nextMsgs = [...messages, { role: "user" as const, content: userText }]
-    setMessages(nextMsgs)
+    setMessages((current) => [...current, { role: "user" as const, content: userText }])
     setBusy(true)
     setBusySince(Date.now())
     setLive(initialTUIState(selectedAgent?.config.model ?? (loadConfig().model || "?")))
     const ac = new AbortController()
     acRef.current = ac
-    const runtime = runtimeForWorkspace(selectedAgent?.config.model)
-    const resume = created
-    if (!created) setCreated(true)
-
+    let sid = sessionRef.current
     try {
-      for await (const ev of runTurn({
-        messages: nextMsgs,
-        runtime,
-        cwd: process.cwd(),
-        sessionId,
+      if (!sid) {
+        const session = (await client.createSession({
+          cwd: process.cwd(),
+          ...(selectedAgent?.config.model ? { model: selectedAgent.config.model } : {}),
+        })) as { id: string }
+        sid = String(session.id)
+        sessionRef.current = sid
+        setSessionId(sid)
+      }
+      const result = await client.prompt(sid, {
+        text: userText,
+        autoApprove: false,
+        ...(agent?.mode ?? mode ? { mode: agent?.mode ?? mode } : {}),
+        ...(activeSkills.length ? { skills: activeSkills } : {}),
+        ...(agent ? { agent } : {}),
+      })
+      const terminal = await runServerTurn(client, {
+        sessionID: sid,
+        after: result.cursor,
         signal: ac.signal,
-        resume,
-        mode: agent?.mode ?? mode,
-        skills: activeSkills,
-        agent,
-        ...(selectedAgent?.config.model ? { model: selectedAgent.config.model } : {}),
-        askPermission: (req) =>
-          new Promise<boolean>((resolve) => {
+        onEvent: (event) => setLive((state) => reduceEvent(state, event)),
+        onPermission: (request) =>
+          new Promise<boolean>((resolve) =>
             setOverlay({
               kind: "permission",
-              name: req.name,
-              reason: req.reason,
-              input: req.input,
+              name: request.name,
+              reason: request.reason,
+              input: request.input,
               resolve: (ok) => {
                 setOverlay(null)
                 resolve(ok)
               },
-            })
+            }),
+          ),
+        onQuestion: (_requestID, questions) =>
+          new Promise((resolve) => {
+            const ask = (
+              index: number,
+              answers: Array<{ header: string; question: string; answer: string }>,
+            ): void => {
+              if (index >= questions.length) {
+                resolve(answers)
+                return
+              }
+              const question = questions[index]
+              setOverlay({
+                kind: "line",
+                label: `${question.header}: ${question.question} `,
+                then: (answer) =>
+                  ask(index + 1, [...answers, { header: question.header, question: question.question, answer }]),
+              })
+            }
+            ask(0, [])
           }),
-      })) {
-        setLive((s) => reduceEvent(s, ev))
-        if (ev.type === "runComplete" || ev.type === "aborted" || ev.type === "error") {
-          try {
-            setMessages(store.load(sessionId).messages)
-          } catch {
-            /* first create race */
-          }
-          setLive((s) => settleTurnView(s, ev))
-        }
+      })
+      if (terminal) {
+        setMessages((await client.messages(sid)) as Message[])
+        setLive((state) => settleTurnView(state, terminal))
+      }
+    } catch (error) {
+      if (ac.signal.aborted) {
+        setLive((s) => settleTurnView(s, { type: "aborted" }))
+      } else {
+        pushLog(`turn failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     } finally {
+      ac.abort()
       setBusy(false)
       setBusySince(undefined)
       acRef.current = null
-      try {
-        setMessages(store.load(sessionId).messages)
-      } catch {
-        /* ignore */
+      if (sid) {
+        try {
+          setMessages((await client.messages(sid)) as Message[])
+        } catch {
+          /* session may have been removed */
+        }
       }
     }
   }
@@ -518,9 +603,9 @@ export function Shell() {
       setMode("build")
       pushLog("mode: build")
     } else if (cmd === "new") {
-      setSessionId(String(randomUUID()))
+      sessionRef.current = ""
+      setSessionId("")
       setMessages([])
-      setCreated(false)
       setActiveSkills([])
       setActiveAgent(null)
       setLog([])
@@ -544,9 +629,16 @@ export function Shell() {
         void runTurnUi(text, agent ? { agent } : {})
         return
       }
-      const skill = findSkill(discoverSkills(), cmd)
-      if (skill) activateSkill(skill)
-      else pushLog(`unknown command: /${cmd} — type / for options`)
+      void client
+        .skills()
+        .then((list) => {
+          const skill = findSkill(list as unknown as Skill[], cmd)
+          if (skill) activateSkill(skill)
+          else pushLog(`unknown command: /${cmd} — type / for options`)
+        })
+        .catch((error) =>
+          pushLog(`skill discovery failed: ${error instanceof Error ? error.message : String(error)}`),
+        )
     }
   }
 
@@ -617,10 +709,8 @@ export function Shell() {
 
     if (overlay) return
     if (key.ctrl && ch === "c") {
-      if (busy && acRef.current) {
-        acRef.current.abort()
-        pushLog("aborted turn")
-      } else exit()
+      if (busy && acRef.current) abortTurn()
+      else exit()
       return
     }
 
@@ -655,20 +745,18 @@ export function Shell() {
       if (line.startsWith("/")) {
         pushLog("slash commands are unavailable during a Turn — queued as steering instead")
       }
-      try {
-        const message: Message = { role: "user", content: line }
-        store.queuePending(sessionId, "prompt", { message })
-        setMessages((current) => [...current, message])
-      } catch {
-        pushLog("could not queue steering input")
-        return
-      }
+      const sid = sessionRef.current
+      if (!sid) return
+      void client
+        .prompt(sid, { text: line, ...(mode ? { mode } : {}) })
+        .then(() => pushLog("queued — applied at the next step"))
+        .catch((error) => pushLog(`could not queue steering input: ${String(error)}`))
+      setMessages((current) => [...current, { role: "user", content: line }])
       try {
         appendHistory(line)
       } catch {
         /* history persist is best-effort */
       }
-      pushLog("queued — applied at the next step")
       return
     }
 

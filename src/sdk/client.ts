@@ -70,6 +70,32 @@ export class NexusClient {
     return this.request<Record<string, unknown>>("config")
   }
 
+  updateConfig(patch: {
+    model?: string
+    preset?: string
+    provider?: string
+    baseUrl?: string
+    apiKey?: string
+  }) {
+    return this.request<void>("configUpdate", {}, { method: "PATCH", body: JSON.stringify(patch) })
+  }
+
+  agents(directory?: string) {
+    return this.request<Array<Record<string, unknown>>>("agents", {}, { query: { directory } })
+  }
+
+  commands(directory?: string) {
+    return this.request<Array<Record<string, unknown>>>("commands", {}, { query: { directory } })
+  }
+
+  skills(directory?: string) {
+    return this.request<Array<Record<string, unknown>>>("skills", {}, { query: { directory } })
+  }
+
+  tools(mode?: string, directory?: string) {
+    return this.request<Array<Record<string, unknown>>>("tools", {}, { query: { mode, directory } })
+  }
+
   location(directory?: string) {
     return this.request<Record<string, unknown>>("location", {}, { query: { directory } })
   }
@@ -141,6 +167,10 @@ export class NexusClient {
     return this.request<Record<string, unknown>>("mcpResources", {}, { query: { directory } })
   }
 
+  mcpReadResource(server: string, uri: string, directory?: string) {
+    return this.request<unknown>("mcpResourceRead", { server }, { query: { uri, directory } })
+  }
+
   ptyList(directory?: string) {
     return this.request<Array<Record<string, unknown>>>("ptyList", {}, { query: { directory } })
   }
@@ -171,6 +201,30 @@ export class NexusClient {
 
   ptyConnectToken(ptyID: string) {
     return this.request<{ ticket: string; expires_in: number }>("ptyConnectToken", { ptyID }, { method: "POST" })
+  }
+
+  persistentPtyRead(sessionID: string, lines?: number, directory?: string) {
+    return this.request<Record<string, unknown> | null>("persistentPtyRead", { sessionID }, { query: { lines, directory } })
+  }
+
+  persistentPtySnapshot(ptyID: string, directory?: string) {
+    return this.request<Record<string, unknown>>("persistentPtySnapshot", { ptyID }, { query: { directory } })
+  }
+
+  persistentPtyShutdown() {
+    return this.request<void>("persistentPtyShutdown", {}, { method: "POST" })
+  }
+
+  persistentPtyHandoff() {
+    return this.request<{ handoff: null }>("persistentPtyHandoff", {}, { method: "POST" })
+  }
+
+  persistentPtyUpdate(ptyID: string, body: Record<string, unknown>, directory?: string) {
+    return this.request<Record<string, unknown>>(
+      "persistentPtyUpdate",
+      { ptyID },
+      { method: "PUT", body: JSON.stringify(body), query: { directory } },
+    )
   }
 
   persistentPtyConnectToken(ptyID: string) {
@@ -205,6 +259,14 @@ export class NexusClient {
 
   pluginList() {
     return this.request<Array<Record<string, unknown>>>("pluginList")
+  }
+
+  pluginCheck() {
+    return this.request<Array<Record<string, unknown>>>("pluginCheck", {}, { method: "POST" })
+  }
+
+  pluginUpdate() {
+    return this.request<Array<Record<string, unknown>>>("pluginUpdate", {}, { method: "POST" })
   }
 
   projectList() {
@@ -283,8 +345,22 @@ export class NexusClient {
     return this.request<unknown[]>("messages", { sessionID }, { query: { limit } })
   }
 
-  prompt(sessionID: string, body: { text: string; images?: unknown[]; autoApprove?: boolean; mode?: string }) {
-    return this.request<unknown>("prompt", { sessionID }, { body: JSON.stringify(body) })
+  prompt(
+    sessionID: string,
+    body: {
+      text: string
+      images?: unknown[]
+      autoApprove?: boolean
+      mode?: string
+      skills?: unknown[]
+      agent?: { prompt?: string; tools?: string[]; mode?: string }
+    },
+  ) {
+    return this.request<{ cursor: number; queued?: boolean } & Record<string, unknown>>(
+      "prompt",
+      { sessionID },
+      { body: JSON.stringify(body) },
+    )
   }
 
   interrupt(sessionID: string) {

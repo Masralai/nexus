@@ -57,7 +57,7 @@ function fakeMcp(): McpControl {
     tools: () => [],
     call: async () => ({ ok: true, output: "" }),
     resources: async () => [{ server: "demo", uri: "file:///readme", name: "README" }],
-    readResource: async () => ({}),
+    readResource: async (server, uri) => ({ server, uri, text: "hello" }),
     prompts: async () => [],
     getPrompt: async () => ({}),
     status: () => status,
@@ -135,6 +135,8 @@ interface TestServer {
   server: ServerHandle
   store: SQLiteStore
   dir: string
+  configPath: string
+  credentialsPath: string
 }
 
 async function withServer(
@@ -160,6 +162,8 @@ async function withServer(
     registry: new Map((opts.tools ?? []).map((tool) => [tool.name, tool])),
     store,
   }
+  const configPath = join(dir, "home", ".nexus.json")
+  const credentialsPath = join(dir, "home", ".nexus", "credentials.json")
   const server = await startServer({
     store,
     token: "test-token",
@@ -168,9 +172,11 @@ async function withServer(
     defaultCwd: dir,
     config: runtime.cfg,
     runtimeFactory: () => runtime,
+    configPath,
+    credentialsPath,
   })
   try {
-    await run({ server, store, dir })
+    await run({ server, store, dir, configPath, credentialsPath })
   } finally {
     await server.stop()
     store.close()
@@ -493,7 +499,12 @@ test("exposes config, providers, models, agents, commands, and tools", async () 
         agents: { reviewer: { description: "Reviews code", mode: "plan" } },
       },
     },
-    async ({ server }) => {
+    async ({ server, dir }) => {
+      mkdirSync(join(dir, ".agents", "skills", "demo"), { recursive: true })
+      writeFileSync(
+        join(dir, ".agents", "skills", "demo", "SKILL.md"),
+        "---\nname: Demo\ndescription: demo skill\n---\nUse the demo.\n",
+      )
       const config = await json<{ data: { model: string } }>(await call(server, "/api/config"))
       expect(config.data.model).toBe("mock")
 
@@ -511,6 +522,9 @@ test("exposes config, providers, models, agents, commands, and tools", async () 
 
       const commands = await json<{ data: Array<{ name: string }> }>(await call(server, "/api/command"))
       expect(commands.data[0].name).toBe("review")
+
+      const skills = await json<{ data: Array<{ id: string }> }>(await call(server, "/api/skill"))
+      expect(skills.data.some((skill) => skill.id === "demo")).toBe(true)
 
       const planTools = await json<{ data: Array<{ name: string }> }>(
         await call(server, "/api/tool?mode=plan"),
@@ -744,6 +758,18 @@ test("exposes location, filesystem, project, reference, form, and plugin routes"
 
       const read = await call(server, `/api/fs/read/src/a.ts?directory=${encodeURIComponent(dir)}`)
       expect(await read.text()).toBe("export const a = 1\n")
+      const etag = read.headers.get("etag")
+      expect(etag).toBeTruthy()
+      expect(read.headers.get("accept-ranges")).toBe("bytes")
+      const cached = await call(server, `/api/fs/read/src/a.ts?directory=${encodeURIComponent(dir)}`, {
+        headers: { "if-none-match": etag! },
+      })
+      expect(cached.status).toBe(304)
+      const partial = await call(server, `/api/fs/read/src/a.ts?directory=${encodeURIComponent(dir)}`, {
+        headers: { range: "bytes=0-5" },
+      })
+      expect(partial.status).toBe(206)
+      expect(await partial.text()).toBe("export")
 
       const found = await json<{ data: Array<{ path: string; type: string }> }>(
         await call(server, `/api/fs/find?directory=${encodeURIComponent(dir)}&query=a.ts`),
@@ -771,6 +797,14 @@ test("exposes location, filesystem, project, reference, form, and plugin routes"
       )
       expect(loaded.data[0]?.id).toBe("fixture")
       expect(loaded.data[0]?.state.status).toBe("active")
+      const checked = await json<{ data: Array<{ id: string }> }>(
+        await call(server, "/api/plugin/check", { method: "POST" }),
+      )
+      expect(checked.data[0]?.id).toBe("fixture")
+      const updatedPlugins = await json<{ data: Array<{ id: string }> }>(
+        await call(server, "/api/plugin/update", { method: "POST" }),
+      )
+      expect(updatedPlugins.data[0]?.id).toBe("fixture")
 
       const debug = await json<{ data: Array<{ directory: string }> }>(await call(server, "/api/debug/location"))
       expect(debug.data.some((entry) => entry.directory === dir)).toBe(true)
@@ -797,6 +831,10 @@ test("exposes MCP status, connect/disconnect, resources, and one-shot generation
       await call(server, "/api/mcp/resource"),
     )
     expect(resources.data.resources[0]?.uri).toBe("file:///readme")
+    const resource = await json<{ data: { text: string } }>(
+      await call(server, `/api/mcp/resource/demo?uri=${encodeURIComponent("file:///readme")}`),
+    )
+    expect(resource.data.text).toBe("hello")
 
     expect(
       (
@@ -821,6 +859,30 @@ test("exposes MCP status, connect/disconnect, resources, and one-shot generation
       await post(server, "/api/experimental/generate", { prompt: "hello" }),
     )
     expect(generated.data.text).toBe("generated")
+  })
+})
+
+test("updates config and credentials over HTTP", async () => {
+  await withServer({}, async ({ server, configPath, credentialsPath }) => {
+    const res = await call(server, "/api/experimental/config", {
+      method: "PATCH",
+      body: JSON.stringify({
+        preset: "openai",
+        model: "gpt-4o-mini",
+        baseUrl: "https://example.test/v1",
+        apiKey: "sk-test",
+      }),
+    })
+    expect(res.status).toBe(204)
+    expect(JSON.parse(readFileSync(configPath, "utf8"))).toMatchObject({
+      preset: "openai",
+      provider: "openai-compatible",
+      model: "gpt-4o-mini",
+      baseUrl: "https://example.test/v1",
+    })
+    expect(JSON.parse(readFileSync(credentialsPath, "utf8"))).toMatchObject({
+      openai: { apiKey: "sk-test", baseUrl: "https://example.test/v1" },
+    })
   })
 })
 
@@ -886,11 +948,35 @@ test("manages PTY and persistent terminal sessions over HTTP", async () => {
       await call(server, `/api/experimental/session/${session.data.id}/terminal`),
     )
     expect(terminals.data).toHaveLength(1)
+    const renamedTerminal = await json<{ data: PtyInfo }>(
+      await call(server, `/api/experimental/persistent-pty/${terminal.data.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ title: "server terminal" }),
+      }),
+    )
+    expect(renamedTerminal.data.title).toBe("server terminal")
+    expect(
+      (await call(server, `/api/pty/${terminal.data.id}/input`, {
+        method: "POST",
+        body: JSON.stringify({ data: "one\ntwo\n" }),
+      })).status,
+    ).toBe(204)
+    const read = await json<{ data: { screen: { text: string } } }>(
+      await call(server, `/api/experimental/session/${session.data.id}/terminal/read?lines=1`),
+    )
+    expect(read.data.screen.text).toBe("two")
+    const snapshot = await json<{ data: { info: PtyInfo; text: string } }>(
+      await call(server, `/api/experimental/persistent-pty/${terminal.data.id}/snapshot`),
+    )
+    expect(snapshot.data.info.id).toBe(terminal.data.id)
+    expect(snapshot.data.text).toBe("one\ntwo\n")
+    expect((await call(server, "/api/experimental/persistent-pty/handoff", { method: "POST" })).status).toBe(200)
 
     expect(
       (await call(server, `/api/experimental/persistent-pty/terminal_${session.data.id}`, { method: "DELETE" }))
         .status,
     ).toBe(204)
+    expect((await call(server, "/api/experimental/persistent-pty/shutdown", { method: "POST" })).status).toBe(204)
     expect((await call(server, `/api/pty/${pty.id}`, { method: "DELETE" })).status).toBe(204)
     expect((await call(server, `/api/pty/${pty.id}`)).status).toBe(404)
   })
