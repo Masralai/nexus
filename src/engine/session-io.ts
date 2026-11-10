@@ -1,4 +1,4 @@
-import type { Message, SessionCounters, SessionMeta, SessionStatus } from "./types"
+import type { DocumentRecord, Message, SessionCounters, SessionMeta, SessionStatus } from "./types"
 
 /** Stable on-disk shape for `nexus export` and `nexus import`. */
 export interface ExportedMessage {
@@ -7,12 +7,21 @@ export interface ExportedMessage {
   message: Message
 }
 
+export interface ExportedDocument {
+  id: string
+  kind: string
+  data: unknown
+  createdAt?: string
+}
+
 export interface SessionExport {
   schemaVersion: 1
   session: SessionMeta
   status: SessionStatus
   counters: SessionCounters
   messages: ExportedMessage[]
+  /** Snapshot and other durable documents owned by the Session. */
+  documents: ExportedDocument[]
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -73,6 +82,21 @@ export function parseSessionExport(raw: unknown): SessionExport {
   }
   const counters = isObject(raw.counters) ? raw.counters : {}
   const number = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0)
+  const documents: ExportedDocument[] = []
+  if (raw.documents !== undefined) {
+    if (!Array.isArray(raw.documents)) throw new Error("session.documents must be an array")
+    for (const entry of raw.documents) {
+      if (!isObject(entry) || typeof entry.id !== "string" || typeof entry.kind !== "string" || !("data" in entry)) {
+        throw new Error("session.documents entries require id, kind and data")
+      }
+      documents.push({
+        id: entry.id,
+        kind: entry.kind,
+        data: entry.data,
+        ...(typeof entry.createdAt === "string" ? { createdAt: entry.createdAt } : {}),
+      })
+    }
+  }
   return {
     schemaVersion: 1,
     session: {
@@ -95,7 +119,17 @@ export function parseSessionExport(raw: unknown): SessionExport {
       cost: number(counters.cost),
     },
     messages,
+    documents,
   }
+}
+
+export function documentsOf(records: DocumentRecord[]): ExportedDocument[] {
+  return records.map((record) => ({
+    id: record.id,
+    kind: record.kind,
+    data: record.data,
+    createdAt: record.createdAt,
+  }))
 }
 
 function textPart(message: Message): string {

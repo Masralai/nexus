@@ -164,9 +164,11 @@ test("export and import round-trip messages and counters", () => {
     db.create(meta, history)
     db.setStatus("s1", "done")
     db.addUsage("s1", { inputTokens: 100, outputTokens: 20, cacheReadTokens: 10 }, 0.25)
+    db.putDocument({ id: "snap_1", sessionId: "s1", kind: "snapshot", data: { files: ["a.ts"] } })
     const doc = db.exportSession("s1")
     expect(doc.messages).toHaveLength(history.length)
     expect(doc.counters).toMatchObject({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 10 })
+    expect(doc.documents).toContainEqual(expect.objectContaining({ id: "snap_1", kind: "snapshot", data: { files: ["a.ts"] } }))
 
     db.delete("s1")
     const restored = db.importSession(doc)
@@ -174,6 +176,8 @@ test("export and import round-trip messages and counters", () => {
     expect(db.load("s1").messages).toEqual(history)
     expect(db.load("s1").status).toBe("done")
     expect(db.counters("s1")).toEqual(doc.counters)
+    expect(db.listDocuments("s1", "snapshot").map((item) => item.id)).toEqual(["snap_1"])
+    expect(db.getDocument("snap_1")?.data).toEqual({ files: ["a.ts"] })
 
     expect(db.importSession(doc).imported).toBe(false)
     expect(db.count()).toBe(1)

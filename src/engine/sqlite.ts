@@ -6,7 +6,7 @@ import { desc, eq } from "drizzle-orm"
 import { drizzle } from "drizzle-orm/bun-sqlite"
 import { MIGRATIONS } from "./migrations"
 import * as schema from "./schema"
-import { parseSessionExport, type SessionExport } from "./session-io"
+import { documentsOf, parseSessionExport, type SessionExport } from "./session-io"
 import { JSONLStore } from "./state"
 import { sessionDisplayTitle, sessionTitle, titleFromText } from "./title"
 import type {
@@ -459,13 +459,20 @@ export class SQLiteStore implements SessionStore {
     return row.seq
   }
 
-  putDocument(record: { id: string; sessionId?: string; kind: string; data: unknown }): void {
+  putDocument(record: { id: string; sessionId?: string; kind: string; data: unknown; createdAt?: string }): void {
     this.sqlite
       .query(
         `INSERT INTO documents (id, session_id, kind, data, created_at) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET data = excluded.data, kind = excluded.kind`,
+         ON CONFLICT(id) DO UPDATE SET
+           session_id = excluded.session_id, kind = excluded.kind, data = excluded.data, created_at = excluded.created_at`,
       )
-      .run(record.id, record.sessionId ?? null, record.kind, JSON.stringify(record.data), new Date().toISOString())
+      .run(
+        record.id,
+        record.sessionId ?? null,
+        record.kind,
+        JSON.stringify(record.data),
+        record.createdAt ?? new Date().toISOString(),
+      )
   }
 
   getDocument(id: string): DocumentRecord | undefined {
@@ -881,6 +888,7 @@ export class SQLiteStore implements SessionStore {
       status: loaded.status,
       counters: this.counters(id),
       messages: this.messageEntries(id).map((entry) => ({ id: entry.id, message: entry.message })),
+      documents: documentsOf(this.listDocuments(id)),
     }
   }
 
@@ -896,6 +904,15 @@ export class SQLiteStore implements SessionStore {
     this.create({ ...doc.session, ...(title ? { title } : {}) }, messages)
     if (doc.status !== "running") this.setStatus(doc.session.id, doc.status)
     this.restoreCounters(doc.session.id, doc.counters)
+    for (const document of doc.documents) {
+      this.putDocument({
+        id: document.id,
+        sessionId: doc.session.id,
+        kind: document.kind,
+        data: document.data,
+        ...(document.createdAt ? { createdAt: document.createdAt } : {}),
+      })
+    }
     return { meta: doc.session, status: doc.status, imported: true }
   }
 
