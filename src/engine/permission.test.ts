@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { decide, gateToolCall, isOutsideCwd, pathForCall, reasonForCall } from "./permission"
+import { decide, gateToolCall, isOutsideCwd, isReadOnlyBash, pathForCall, reasonForCall } from "./permission"
 
 test("decide: readonly in cwd allows; mutators ask", () => {
   const rules = {}
@@ -7,7 +7,7 @@ test("decide: readonly in cwd allows; mutators ask", () => {
   expect(decide(rules, "list", "x", { readonly: true })).toBe("allow")
   expect(decide(rules, "write", "x")).toBe("ask")
   expect(decide(rules, "edit", "x")).toBe("ask")
-  expect(decide(rules, "bash", "ls")).toBe("ask")
+  expect(decide(rules, "bash", "npm install")).toBe("ask")
 })
 
 test("decide: outside-cwd readonly asks", () => {
@@ -110,4 +110,57 @@ test("reasonForCall prefers command/path", () => {
   expect(reasonForCall("bash", { command: "rm -rf /" })).toBe("rm -rf /")
   expect(reasonForCall("write", { path: "a.ts", content: "x" })).toBe("write a.ts")
   expect(reasonForCall("list", { path: "src" })).toBe("list src")
+})
+
+test("decide: allows safe read-only bash in cwd by default", () => {
+  expect(decide({}, "bash", "pwd", { cwd: "/proj" })).toBe("allow")
+  expect(decide({}, "bash", "ls", { cwd: "/proj" })).toBe("allow")
+  expect(decide({}, "bash", "ls src", { cwd: "/proj" })).toBe("allow")
+  expect(decide({}, "bash", "cat README.md", { cwd: "/proj" })).toBe("allow")
+  expect(decide({}, "bash", "git status", { cwd: "/proj" })).toBe("allow")
+  expect(decide({}, "bash", "git diff -- src/a.ts", { cwd: "/proj" })).toBe("allow")
+  expect(decide({}, "bash", "git blame src/a.ts", { cwd: "/proj" })).toBe("allow")
+  expect(decide({}, "bash", "rg TODO src", { cwd: "/proj" })).toBe("allow")
+})
+
+test("decide: asks mutating, complex, or outside-cwd bash", () => {
+  expect(decide({}, "bash", "rm -rf /", { cwd: "/proj" })).toBe("ask")
+  expect(decide({}, "bash", "touch a", { cwd: "/proj" })).toBe("ask")
+  expect(decide({}, "bash", "cat /etc/passwd", { cwd: "/proj" })).toBe("ask")
+  expect(decide({}, "bash", "ls ../..", { cwd: "/proj" })).toBe("ask")
+  expect(decide({}, "bash", "ls | wc -l", { cwd: "/proj" })).toBe("ask")
+  expect(decide({}, "bash", "echo hi > out.txt", { cwd: "/proj" })).toBe("ask")
+  expect(decide({}, "bash", "git checkout main", { cwd: "/proj" })).toBe("ask")
+  expect(decide({}, "bash", "find . -delete", { cwd: "/proj" })).toBe("ask")
+})
+
+test("decide: explicit bash rules still override read-only default", () => {
+  expect(decide({ denyTools: ["bash"] }, "bash", "pwd", { cwd: "/proj" })).toBe("deny")
+  expect(decide({ askTools: ["bash"] }, "bash", "pwd", { cwd: "/proj" })).toBe("ask")
+  expect(decide({ allowTools: ["bash"] }, "bash", "rm -rf /", { cwd: "/proj" })).toBe("allow")
+  expect(decide({ denyPatterns: [/pwd/] }, "bash", "pwd", { cwd: "/proj" })).toBe("deny")
+})
+
+test("isReadOnlyBash basic cases", () => {
+  expect(isReadOnlyBash("pwd", "/proj")).toBe(true)
+  expect(isReadOnlyBash("cat src/a.ts", "/proj")).toBe(true)
+  expect(isReadOnlyBash("cat /etc/passwd", "/proj")).toBe(false)
+  expect(isReadOnlyBash("npm install", "/proj")).toBe(false)
+})
+
+test("gateToolCall allows read-only bash without asking", async () => {
+  let asked = false
+  const ok = await gateToolCall({
+    rules: {},
+    id: "1",
+    name: "bash",
+    input: { command: "pwd" },
+    cwd: "/proj",
+    onAsk: () => {
+      asked = true
+    },
+    askPermission: async () => false,
+  })
+  expect(ok).toBe(true)
+  expect(asked).toBe(false)
 })

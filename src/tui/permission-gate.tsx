@@ -11,7 +11,7 @@ export function PermissionGate(props: {
   name: string
   reason: string
   input: unknown
-  onResolve: (ok: boolean) => void
+  onResolve: (reply: boolean | "always") => void
 }) {
   const t = theme()
   return (
@@ -26,10 +26,11 @@ export function PermissionGate(props: {
         title=""
         items={[
           { id: "yes", label: "Approve" },
+          { id: "always", label: "Always allow" },
           { id: "no", label: "Deny" },
         ]}
         selectedColor={t.gold}
-        onSelect={(id) => props.onResolve(id === "yes")}
+        onSelect={(id) => props.onResolve(id === "always" ? "always" : id === "yes")}
         onCancel={() => props.onResolve(false)}
       />
     </Box>
