@@ -106,6 +106,10 @@ export class NexusClient {
     return this.api.providerVerify({ body: JSON.stringify(input) })
   }
 
+  providers() {
+    return this.api.providers({})
+  }
+
   agents(directory?: string) {
     return this.api.agents({ query: { directory } })
   }

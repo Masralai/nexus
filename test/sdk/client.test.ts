@@ -52,6 +52,14 @@ test("SDK client drives a Turn over HTTP", async () => {
     expect(info.version).toBe("0.1.0")
     const generated = await client.api.info()
     expect(generated.version).toBe("0.1.0")
+    const cfg = (await client.config()) as { model: string }
+    expect(cfg.model).toBe("mock")
+    expect((await client.effectiveConfig()) as { model: string }).toMatchObject({ model: "mock" })
+    const providers = (await client.providers()) as Array<{ id: string }>
+    expect(Array.isArray(providers)).toBe(true)
+    expect((await client.commands()) as unknown[]).toBeInstanceOf(Array)
+    expect((await client.agents()) as unknown[]).toBeInstanceOf(Array)
+    expect(await client.modelDefault()).toBeTruthy()
     const session = (await client.createSession({ title: "sdk" })) as { id: string; title: string }
     expect(session.title).toBe("sdk")
     writeFileSync(join(dir, "note.txt"), "hello file")
