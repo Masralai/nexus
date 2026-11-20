@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Runtime } from "../../src/cli/launch"
@@ -50,8 +50,13 @@ test("SDK client drives a Turn over HTTP", async () => {
     const client = new NexusClient({ url: server.url, token: "sdk-token" })
     const info = await client.info()
     expect(info.version).toBe("0.1.0")
+    const generated = await client.api.info()
+    expect(generated.version).toBe("0.1.0")
     const session = (await client.createSession({ title: "sdk" })) as { id: string; title: string }
     expect(session.title).toBe("sdk")
+    writeFileSync(join(dir, "note.txt"), "hello file")
+    expect(await client.fsRead("note.txt")).toBe("hello file")
+    expect(await client.renameSession(session.id, "renamed")).toBeUndefined()
     const prompt = await client.prompt(session.id, { text: "hi" })
     expect(prompt.cursor).toBeGreaterThan(0)
     let done = false

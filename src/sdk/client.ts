@@ -1,8 +1,16 @@
-import { ROUTES, routePath, type RouteName } from "../server/contract"
+import {
+  ROUTES,
+  routePath,
+  type ResponseOf,
+  type RouteDefinition,
+  type RouteInit,
+  type RouteName,
+} from "../server/contract"
 import type { WireEvent } from "../server/service"
+import { createRouteSurface, type RouteParams } from "./generated"
 
 export { ROUTES, routePath }
-export type { RouteName, WireEvent }
+export type { ResponseOf, RouteInit, RouteName, RouteParams, WireEvent }
 
 export class NexusApiError extends Error {
   constructor(
@@ -23,26 +31,27 @@ export interface NexusClientOptions {
 
 /**
  * Typed HTTP client over the same route table the server serves.
- * This is the M2 skeleton: resource methods plus a resumable event stream.
+ *
+ * `api` is generated from the contract: one method per JSON route, with path
+ * parameters parsed from the path pattern and responses from `RouteResponses`.
+ * The methods below it are ergonomic wrappers over that surface.
  */
 export class NexusClient {
   readonly url: string
   readonly token: string
+  readonly api: ReturnType<typeof createRouteSurface>
   private readonly fetchImpl: typeof fetch
 
   constructor(options: NexusClientOptions) {
     this.url = options.url.replace(/\/+$/, "")
     this.token = options.token
     this.fetchImpl = options.fetch ?? fetch
+    this.api = createRouteSurface((name, params, init) => this.request(name, params, init))
   }
 
-  async request<T>(
-    name: RouteName,
-    params: Record<string, string> = {},
-    init: RequestInit & { query?: Record<string, string | number | undefined> } = {},
-  ): Promise<T> {
+  async request<N extends RouteName>(name: N, params: RouteParams[N], init: RouteInit = {}): Promise<ResponseOf<N>> {
     const route = ROUTES[name]
-    const url = new URL(this.url + routePath(name, params))
+    const url = new URL(this.url + routePath(name, params as Record<string, string>))
     for (const [key, value] of Object.entries(init.query ?? {})) {
       if (value !== undefined && value !== "") url.searchParams.set(key, String(value))
     }
@@ -54,20 +63,33 @@ export class NexusClient {
     const rest = { ...init }
     delete rest.query
     const res = await this.fetchImpl(url, { ...rest, method: route.method, headers })
-    if (res.status === 204) return undefined as T
-    const parsed = (await res.json()) as { data?: T; error?: { code: string; message: string } }
+    if (res.status === 204) return undefined as ResponseOf<N>
+    if ((route as RouteDefinition).wire === "text") {
+      if (!res.ok) throw await failure(res)
+      return (await res.text()) as ResponseOf<N>
+    }
+    const parsed = (await res.json()) as { data?: ResponseOf<N>; error?: { code: string; message: string } }
     if (!res.ok) {
       throw new NexusApiError(res.status, parsed.error?.code ?? "internal", parsed.error?.message ?? res.statusText)
     }
-    return parsed.data as T
+    return parsed.data as ResponseOf<N>
   }
 
   info() {
-    return this.request<Record<string, unknown>>("info")
+    return this.api.info()
   }
 
   config() {
-    return this.request<Record<string, unknown>>("config")
+    return this.api.config()
+  }
+
+  /** Effective config (live) for clients that need commands/agents/model without local reads. */
+  effectiveConfig(_directory?: string) {
+    return this.config()
+  }
+
+  modelDefault() {
+    return this.api.modelDefault()
   }
 
   updateConfig(patch: {
@@ -77,162 +99,143 @@ export class NexusClient {
     baseUrl?: string
     apiKey?: string
   }) {
-    return this.request<void>("configUpdate", {}, { method: "PATCH", body: JSON.stringify(patch) })
+    return this.api.configUpdate({ body: JSON.stringify(patch) })
+  }
+
+  verifyProvider(input: { preset: string; apiKey: string; baseUrl?: string; model?: string }) {
+    return this.api.providerVerify({ body: JSON.stringify(input) })
   }
 
   agents(directory?: string) {
-    return this.request<Array<Record<string, unknown>>>("agents", {}, { query: { directory } })
+    return this.api.agents({ query: { directory } })
   }
 
   commands(directory?: string) {
-    return this.request<Array<Record<string, unknown>>>("commands", {}, { query: { directory } })
+    return this.api.commands({ query: { directory } })
   }
 
   skills(directory?: string) {
-    return this.request<Array<Record<string, unknown>>>("skills", {}, { query: { directory } })
+    return this.api.skills({ query: { directory } })
   }
 
   tools(mode?: string, directory?: string) {
-    return this.request<Array<Record<string, unknown>>>("tools", {}, { query: { mode, directory } })
+    return this.api.tools({ query: { mode, directory } })
   }
 
   location(directory?: string) {
-    return this.request<Record<string, unknown>>("location", {}, { query: { directory } })
+    return this.api.location({ query: { directory } })
   }
 
   reloadLocation() {
-    return this.request<void>("locationReload", {}, { method: "POST" })
+    return this.api.locationReload({})
   }
 
   debugLocations() {
-    return this.request<Array<{ directory: string; model?: string }>>("debugLocations")
+    return this.api.debugLocations({})
   }
 
   evictLocation(directory: string, model?: string) {
-    return this.request<void>("debugEvict", {}, { method: "DELETE", query: { directory, model } })
+    return this.api.debugEvict({ query: { directory, model } })
   }
 
   fsList(path?: string, directory?: string) {
-    return this.request<Array<{ path: string; type: string }>>("fsList", {}, { query: { path, directory } })
+    return this.api.fsList({ query: { path, directory } })
   }
 
-  async fsRead(path: string, directory?: string): Promise<string> {
-    const url = new URL(this.url + routePath("fsRead", { "*": path }))
-    if (directory) url.searchParams.set("directory", directory)
-    const res = await this.fetchImpl(url, { headers: { authorization: `Bearer ${this.token}` } })
-    if (!res.ok) {
-      const parsed = (await res.json().catch(() => ({}))) as { error?: { code: string; message: string } }
-      throw new NexusApiError(res.status, parsed.error?.code ?? "internal", parsed.error?.message ?? res.statusText)
-    }
-    return res.text()
+  fsRead(path: string, directory?: string) {
+    return this.api.fsRead({ "*": path }, { query: { directory } })
   }
 
   fsFind(query: string, opts: { type?: "file" | "directory"; limit?: number; directory?: string } = {}) {
-    return this.request<Array<{ path: string; type: string }>>("fsFind", {}, { query: { query, ...opts } })
+    return this.api.fsFind({ query: { query, ...opts } })
   }
 
   fsWrite(path: string, content: string, directory?: string) {
-    return this.request<{ path: string }>(
-      "fsWrite",
-      {},
-      { body: content, headers: { "content-type": "text/plain" }, query: { path, directory } },
-    )
+    return this.api.fsWrite({ body: content, headers: { "content-type": "text/plain" }, query: { path, directory } })
   }
 
   mcpServers(directory?: string) {
-    return this.request<Array<Record<string, unknown>>>("mcpList", {}, { query: { directory } })
+    return this.api.mcpList({ query: { directory } })
   }
 
   mcpAdd(server: string, config: Record<string, unknown>, directory?: string) {
-    return this.request<void>(
-      "mcpAdd",
-      { server },
-      { body: JSON.stringify({ config }), query: { directory } },
-    )
+    return this.api.mcpAdd({ server }, { body: JSON.stringify({ config }), query: { directory } })
   }
 
   mcpRemove(server: string, directory?: string) {
-    return this.request<void>("mcpRemove", { server }, { query: { directory } })
+    return this.api.mcpRemove({ server }, { query: { directory } })
   }
 
   mcpConnect(server: string, directory?: string) {
-    return this.request<void>("mcpConnect", { server }, { method: "POST", query: { directory } })
+    return this.api.mcpConnect({ server }, { query: { directory } })
   }
 
   mcpDisconnect(server: string, directory?: string) {
-    return this.request<void>("mcpDisconnect", { server }, { method: "POST", query: { directory } })
+    return this.api.mcpDisconnect({ server }, { query: { directory } })
   }
 
   mcpResources(directory?: string) {
-    return this.request<Record<string, unknown>>("mcpResources", {}, { query: { directory } })
+    return this.api.mcpResources({ query: { directory } })
   }
 
   mcpReadResource(server: string, uri: string, directory?: string) {
-    return this.request<unknown>("mcpResourceRead", { server }, { query: { uri, directory } })
+    return this.api.mcpResourceRead({ server }, { query: { uri, directory } })
   }
 
   ptyList(directory?: string) {
-    return this.request<Array<Record<string, unknown>>>("ptyList", {}, { query: { directory } })
+    return this.api.ptyList({ query: { directory } })
   }
 
   ptyCreate(body: Record<string, unknown> = {}, directory?: string) {
-    return this.request<Record<string, unknown>>("ptyCreate", {}, { body: JSON.stringify(body), query: { directory } })
+    return this.api.ptyCreate({ body: JSON.stringify(body), query: { directory } })
   }
 
   ptyGet(ptyID: string, directory?: string) {
-    return this.request<Record<string, unknown>>("ptyGet", { ptyID }, { query: { directory } })
+    return this.api.ptyGet({ ptyID }, { query: { directory } })
   }
 
   ptyUpdate(ptyID: string, body: Record<string, unknown>, directory?: string) {
-    return this.request<Record<string, unknown>>("ptyUpdate", { ptyID }, { method: "PUT", body: JSON.stringify(body), query: { directory } })
+    return this.api.ptyUpdate({ ptyID }, { body: JSON.stringify(body), query: { directory } })
   }
 
   ptyRemove(ptyID: string, directory?: string) {
-    return this.request<void>("ptyRemove", { ptyID }, { query: { directory } })
+    return this.api.ptyRemove({ ptyID }, { query: { directory } })
   }
 
   ptyInput(ptyID: string, data: string) {
-    return this.request<void>("ptyInput", { ptyID }, { body: JSON.stringify({ data }) })
+    return this.api.ptyInput({ ptyID }, { body: JSON.stringify({ data }) })
   }
 
   ptyOutput(ptyID: string, offset?: number, directory?: string) {
-    return this.request<{ data: string; offset: number }>("ptyOutput", { ptyID }, { query: { offset, directory } })
+    return this.api.ptyOutput({ ptyID }, { query: { offset, directory } })
   }
 
   ptyConnectToken(ptyID: string) {
-    return this.request<{ ticket: string; expires_in: number }>("ptyConnectToken", { ptyID }, { method: "POST" })
+    return this.api.ptyConnectToken({ ptyID })
   }
 
   persistentPtyRead(sessionID: string, lines?: number, directory?: string) {
-    return this.request<Record<string, unknown> | null>("persistentPtyRead", { sessionID }, { query: { lines, directory } })
+    return this.api.persistentPtyRead({ sessionID }, { query: { lines, directory } })
   }
 
   persistentPtySnapshot(ptyID: string, directory?: string) {
-    return this.request<Record<string, unknown>>("persistentPtySnapshot", { ptyID }, { query: { directory } })
+    return this.api.persistentPtySnapshot({ ptyID }, { query: { directory } })
   }
 
   persistentPtyShutdown() {
-    return this.request<void>("persistentPtyShutdown", {}, { method: "POST" })
+    return this.api.persistentPtyShutdown({})
   }
 
-  persistentPtyHandoff() {
-    return this.request<{ handoff: null }>("persistentPtyHandoff", {}, { method: "POST" })
+  persistentPtyHandoff(sessionID: string) {
+    return this.api.persistentPtyHandoff({ sessionID })
   }
 
   persistentPtyUpdate(ptyID: string, body: Record<string, unknown>, directory?: string) {
-    return this.request<Record<string, unknown>>(
-      "persistentPtyUpdate",
-      { ptyID },
-      { method: "PUT", body: JSON.stringify(body), query: { directory } },
-    )
+    return this.api.persistentPtyUpdate({ ptyID }, { body: JSON.stringify(body), query: { directory } })
   }
 
   persistentPtyConnectToken(ptyID: string) {
-    return this.request<{ ticket: string; expires_in: number }>(
-      "persistentPtyConnectToken",
-      { ptyID },
-      { method: "POST" },
-    )
+    return this.api.persistentPtyConnectToken({ ptyID })
   }
 
   /** Open a ticket-authenticated PTY socket. Resize with `ptyResize` on the returned socket. */
@@ -258,91 +261,79 @@ export class NexusClient {
   }
 
   pluginList() {
-    return this.request<Array<Record<string, unknown>>>("pluginList")
+    return this.api.pluginList({})
   }
 
   pluginCheck() {
-    return this.request<Array<Record<string, unknown>>>("pluginCheck", {}, { method: "POST" })
+    return this.api.pluginCheck({})
   }
 
   pluginUpdate() {
-    return this.request<Array<Record<string, unknown>>>("pluginUpdate", {}, { method: "POST" })
+    return this.api.pluginUpdate({})
   }
 
   projectList() {
-    return this.request<Array<Record<string, unknown>>>("projectList")
+    return this.api.projectList({})
   }
 
   projectUpdate(projectID: string, patch: Record<string, unknown>) {
-    return this.request<Record<string, unknown>>("projectUpdate", { projectID }, { body: JSON.stringify(patch) })
+    return this.api.projectUpdate({ projectID }, { body: JSON.stringify(patch) })
   }
 
   referenceList(directory?: string) {
-    return this.request<Array<Record<string, unknown>>>("referenceList", {}, { query: { directory } })
+    return this.api.referenceList({ query: { directory } })
   }
 
   formList(directory?: string) {
-    return this.request<Array<Record<string, unknown>>>("formList", {}, { query: { directory } })
+    return this.api.formList({ query: { directory } })
   }
 
   generate(prompt: string, model?: string) {
-    return this.request<{ text: string }>("generate", {}, { body: JSON.stringify({ prompt, model }) })
+    return this.api.generate({ body: JSON.stringify({ prompt, model }) })
   }
 
   listSessions(query?: string, limit?: number) {
-    return this.request<unknown[]>("sessions", {}, { query: { search: query, limit } })
+    return this.api.sessions({ query: { search: query, limit } })
   }
 
   createSession(body: Record<string, unknown> = {}) {
-    return this.request<Record<string, unknown>>("sessionCreate", {}, { body: JSON.stringify(body) })
+    return this.api.sessionCreate({ body: JSON.stringify(body) })
   }
 
   getSession(sessionID: string) {
-    return this.request<Record<string, unknown>>("session", { sessionID })
+    return this.api.session({ sessionID })
   }
 
   renameSession(sessionID: string, title: string) {
-    return this.request<void>("sessionUpdate", { sessionID }, { body: JSON.stringify({ title }) })
+    return this.api.sessionUpdate({ sessionID }, { body: JSON.stringify({ title }) })
   }
 
   deleteSession(sessionID: string) {
-    return this.request<void>("sessionDelete", { sessionID })
+    return this.api.sessionDelete({ sessionID })
   }
 
   revertSession(sessionID: string, messageID?: string) {
-    return this.request<Record<string, unknown>>(
-      "sessionRevert",
-      { sessionID },
-      { body: JSON.stringify(messageID ? { messageID } : {}) },
-    )
+    return this.api.sessionRevert({ sessionID }, { body: JSON.stringify(messageID ? { messageID } : {}) })
   }
 
   forkSession(sessionID: string, opts: { messageID?: string; title?: string } = {}) {
-    return this.request<Record<string, unknown>>(
-      "sessionFork",
-      { sessionID },
-      { body: JSON.stringify(opts) },
-    )
+    return this.api.sessionFork({ sessionID }, { body: JSON.stringify(opts) })
   }
 
   exportSession(sessionID: string) {
-    return this.request<Record<string, unknown>>("sessionExport", { sessionID })
+    return this.api.sessionExport({ sessionID })
   }
 
   importSession(body: Record<string, unknown>) {
-    return this.request<{ session: Record<string, unknown>; imported: boolean }>(
-      "sessionImport",
-      {},
-      { body: JSON.stringify(body) },
-    )
+    return this.api.sessionImport({ body: JSON.stringify(body) })
   }
 
   sessionUsage(sessionID: string) {
-    return this.request<Record<string, unknown>>("sessionUsage", { sessionID })
+    return this.api.sessionUsage({ sessionID })
   }
 
   messages(sessionID: string, limit?: number) {
-    return this.request<unknown[]>("messages", { sessionID }, { query: { limit } })
+    return this.api.messages({ sessionID }, { query: { limit } })
   }
 
   prompt(
@@ -356,31 +347,23 @@ export class NexusClient {
       agent?: { prompt?: string; tools?: string[]; mode?: string }
     },
   ) {
-    return this.request<{ cursor: number; queued?: boolean } & Record<string, unknown>>(
-      "prompt",
-      { sessionID },
-      { body: JSON.stringify(body) },
-    )
+    return this.api.prompt({ sessionID }, { body: JSON.stringify(body) })
   }
 
   interrupt(sessionID: string) {
-    return this.request<void>("interrupt", { sessionID })
+    return this.api.interrupt({ sessionID })
+  }
+
+  abort(sessionID: string) {
+    return this.interrupt(sessionID)
   }
 
   replyPermission(sessionID: string, requestID: string, decision: boolean | "always" | "once" | "deny") {
-    return this.request<void>(
-      "permissionReply",
-      { sessionID, requestID },
-      { body: JSON.stringify({ decision }) },
-    )
+    return this.api.permissionReply({ sessionID, requestID }, { body: JSON.stringify({ decision }) })
   }
 
   replyQuestion(sessionID: string, requestID: string, answers: unknown[]) {
-    return this.request<void>(
-      "questionReply",
-      { sessionID, requestID },
-      { body: JSON.stringify({ answers }) },
-    )
+    return this.api.questionReply({ sessionID, requestID }, { body: JSON.stringify({ answers }) })
   }
 
   /** Follow SSE and yield wire events. Pass `after` to resume from a cursor. */
@@ -394,10 +377,7 @@ export class NexusClient {
       headers: { authorization: `Bearer ${this.token}` },
       signal: opts.signal,
     })
-    if (!res.ok || !res.body) {
-      const parsed = (await res.json().catch(() => ({}))) as { error?: { code: string; message: string } }
-      throw new NexusApiError(res.status, parsed.error?.code ?? "internal", parsed.error?.message ?? res.statusText)
-    }
+    if (!res.ok || !res.body) throw await failure(res)
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ""
@@ -415,6 +395,11 @@ export class NexusClient {
       }
     }
   }
+}
+
+async function failure(res: Response): Promise<NexusApiError> {
+  const parsed = (await res.json().catch(() => ({}))) as { error?: { code: string; message: string } }
+  return new NexusApiError(res.status, parsed.error?.code ?? "internal", parsed.error?.message ?? res.statusText)
 }
 
 function parseSse(raw: string): WireEvent | undefined {
