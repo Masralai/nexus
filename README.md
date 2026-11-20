@@ -254,6 +254,7 @@ HTTP clients use the same capabilities: `POST /api/session/:id/revert`, `POST /a
 | `openrouter` | `openai-compatible` | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4`, `openai/gpt-4o` |
 | `groq` | `openai-compatible` | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
 | `deepseek` | `openai-compatible` | `https://api.deepseek.com/v1` | `deepseek-chat`, `deepseek-reasoner` |
+| `commandcode` | `openai-compatible` | `https://api.commandcode.ai/provider/v1` | `deepseek/deepseek-v4.1-flash`, `moonshotai/Kimi-K3`, `gpt-6.1-sol` |
 | `ollama` | `openai-compatible` | `http://127.0.0.1:11434/v1` | `llama3.2`, `qwen2.5-coder` |
 
 `Other` lets you enter a custom id + base URL for any OpenAI-compatible endpoint.
@@ -269,7 +270,7 @@ HTTP clients use the same capabilities: `POST /api/session/:id/revert`, `POST /a
 }
 ```
 
-Resolution order per preset `envKeys`: env var first (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, etc.), then credentials file. Keys are scoped to the active preset and never borrowed across providers. The `mock` provider needs no key.
+Resolution order per preset `envKeys`: env var first (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `CMD_API_KEY` for Command Code, etc.), then credentials file. Keys are scoped to the active preset and never borrowed across providers. The `mock` provider needs no key.
 
 **Instructions.** Discovery loads global `AGENTS.md`, then project files from the repository root toward the working directory, plus `@`-imports and configured `instructions` paths/URLs. Relative configured paths resolve from the `.nexus.json` that declared them. Auto-discovery of nearby subtree `AGENTS.md` files when a file is read is planned for M3.
 
@@ -357,6 +358,7 @@ nexus/
 │   ├── skills/       # index.ts (discover/format/filter)
 │   └── tui/          # shell.tsx, live-turn.tsx, stream.tsx, permission-gate.tsx, picker.tsx, ...
 ├── fixtures/providers/  # recorded provider fixtures
+├── fixtures/parity/     # pinned parity fixture + reference transcript
 ├── web/              # install.sh / install.ps1
 ├── landing/          # Next.js marketing site
 └── .github/workflows/ # ci.yml, release.yml
@@ -371,7 +373,26 @@ bun run typecheck        # tsc --noEmit
 bun run src/cli/main.ts --help
 ```
 
-CI runs `bun install` → `bun test` → `bun run typecheck` on every push/PR to `main` (`.github/workflows/ci.yml:16`).
+CI runs `bun install` → `bun test` → `bun run typecheck` on every push/PR to `main` (`.github/workflows/ci.yml:16`). A separate `parity` job runs the Tier 1 replay gate.
+
+### Parity harness
+
+Nexus is measured against a pinned reference build (`f7d5b6ffc4`, v2.1.2, recorded in `fixtures/parity/read-file.json`). Tier 1 is deterministic and needs no API key: `src/parity/replay.test.ts` replays recorded provider streams through the real Turn loop and compares Session parts, tool order, step count and status against `fixtures/parity/reference.json`.
+
+```bash
+bun test src/parity                                   # Tier 1 gate
+bun run parity <actual.json> <reference.json>         # compare two recorded transcripts
+bun run parity --actual-command <cmd> --reference-command <cmd> --fixture fixtures/parity/read-file.json
+```
+
+`fixtures/parity/reference.json` is currently a structural golden. To replace it with a real recording, run the fixture scenario against the pinned reference build with a key, export that session, then map it:
+
+```bash
+<reference-cli> session export --sanitize <session> > /tmp/export.json
+bun scripts/parity-record.ts /tmp/export.json --exit-code 0 > fixtures/parity/reference.json
+```
+
+The comparator, command runner and export mapper live in `src/parity/harness.ts`, `scripts/parity.ts` and `src/parity/session-export.ts`. Tier 2 (live models) is release-only and never runs in pull-request CI.
 
 ## Troubleshooting
 

@@ -10,7 +10,9 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "build:compile": "mkdir -p dist && bun build --compile ./src/cli/main.ts --outfile dist/nexus",
-    "parity": "bun run scripts/parity.ts"
+    "parity": "bun run scripts/parity.ts",
+    "parity:tier2": "bun run scripts/parity-tier2.ts",
+    "sdk:generate": "bun run scripts/sdk-generate.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

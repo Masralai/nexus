@@ -17,8 +17,12 @@ jobs:
       - run: bun install
       - run: bun run build:compile
       - run: cp dist/nexus nexus-linux-amd64
+      - name: Read parity pin
+        run: echo "PARITY_PIN=$(jq -r '.pin.implementation + \" \" + .pin.version + \" (\" + .pin.commit + \")\"' fixtures/parity/read-file.json)" >> "$GITHUB_ENV"
       - uses: softprops/action-gh-release@v2
         with:
           files: nexus-linux-amd64
+          body: |
+            Parity reference: ${{ env.PARITY_PIN }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
