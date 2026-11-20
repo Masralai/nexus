@@ -39,7 +39,7 @@ Use it as an interactive shell for day-to-day coding or as a headless one-shot r
 
 - **Model-agnostic** — Anthropic, OpenAI, Gemini, OpenRouter, Groq, DeepSeek, xAI, Mistral, Cohere, Ollama via one config (`src/providers/presets.ts`)
 - **Two agent modes** — `plan` (read-only, auto-allowed) and `build` (full tools with approval)
-- **Permission gate** — readonly tools inside the session cwd are auto-allowed; `write`/`edit`/`bash` and paths outside cwd always ask (`src/engine/permission.ts:17`)
+- **Permission gate** — readonly tools and safe read-only `bash` commands inside the session cwd are auto-allowed by default; mutating/ambiguous `bash` and paths outside cwd ask (`src/engine/permission.ts`)
 - **Six focused tools** — `read`, `write`, `edit`, `bash`, `list`, `glob`, `grep`, plus patch, snapshots, jobs, LSP, sub-agents, and git worktrees (`src/tools/index.ts`)
 - **Durable sessions** — SQLite at `~/.nexus/nexus.db` with typed parts, revert/fork, JSON/Markdown export and import, and a one-time legacy JSONL migration (`src/engine/sqlite.ts`, `nexus migrate`)
 - **Real prompt architecture** — policy and environment in the provider system channel, layered `AGENTS.md` discovery, per-tool truncation, pairing-safe compaction, and generated Session titles (`src/engine/prompt.ts`, `src/engine/instructions.ts`, `src/engine/compact.ts`, `src/engine/title.ts`)
@@ -59,14 +59,14 @@ Use it as an interactive shell for day-to-day coding or as a headless one-shot r
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/masralai/nexus/main/scripts/install.sh | sh
-# -> ~/.local/bin/nexus  (add to PATH if prompted)
+# -> ~/.local/bin/nexus (add to PATH if prompted)
 nexus --version
 ```
 
 Custom repo or mirror:
 
 ```bash
-NEXUS_INSTALL_REPO=myorg/nexus sh web/install.sh
+curl -fsSL https://raw.githubusercontent.com/myorg/nexus/main/scripts/install.sh | NEXUS_INSTALL_REPO=myorg/nexus sh
 ```
 
 ### Windows (PowerShell)
@@ -97,7 +97,7 @@ bun run build:compile   # -> dist/nexus
 ```
 
 > [!NOTE]
-> Releases publish `nexus-linux-amd64` on every `v*` tag via `.github/workflows/release.yml:18`.
+> Releases publish `nexus-linux-amd64`, `nexus-linux-arm64`, `nexus-darwin-amd64`, `nexus-darwin-arm64`, `nexus-windows-amd64.exe`, and a `checksums.txt` on every `v*` tag via `.github/workflows/release.yml`.
 
 ## Quick start
 
@@ -294,7 +294,7 @@ A **Session** holds many **Messages** and is advanced by **Turns**. Each Turn bu
 Key seams:
 
 - **Turn launcher** — single place that builds provider, compact provider, registry, and store (shared by shell and CLI).
-- **Permission gate** — single decision per tool call (`decide()` + `gateToolCall()`); readonly inside cwd → allow, `bash`/outside cwd → ask, denied tools → deny.
+- **Permission gate** — single decision per tool call (`decide()` + `gateToolCall()`); readonly tools and safe read-only `bash` in cwd → allow, mutating/ambiguous `bash` or outside cwd → ask, denied tools → deny.
 - **Agent mode** — `plan` advertises only readonly tools and denies `write`/`edit`/`bash` (`src/engine/mode.ts:6`); `build` advertises all.
 - **Prompt assembly** — the system channel + per-tool truncation are prompt-only; durable history is never mutated except by compaction.
 
@@ -319,7 +319,7 @@ Key seams:
 | `worktree_create` / `worktree_list` / `worktree_remove` | mixed | `{ name?, branch?, from?, directory? }`, `{ directory, force? }` | Isolated git worktrees on their own branches |
 
 > [!WARNING]
-> `bash` always asks for approval and should not be used for listing or reading files — use `list`/`glob`/`read`/`grep` instead.
+> Safe read-only `bash` commands inside the session cwd may run without approval, but prefer `list`/`glob`/`read`/`grep` for file operations. Mutating or ambiguous shell commands still require approval.
 
 ## Agent modes
 

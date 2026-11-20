@@ -15,19 +15,35 @@ switch ($Arch.ToLower()) {
 
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 $Dest = Join-Path $BinDir "nexus.exe"
-$Url = "https://github.com/$Repo/releases/latest/download/$Asset"
+$Base = "https://github.com/$Repo/releases/latest/download"
+$Url = "$Base/$Asset"
+$ChecksumsUrl = "$Base/checksums.txt"
 
-Write-Host "downloading $Url"
+Write-Host "downloading $Asset"
 try {
-  # Use TLS 1.2
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
   Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+  $ChecksumsPath = Join-Path $BinDir "checksums.txt"
+  Invoke-WebRequest -Uri $ChecksumsUrl -OutFile $ChecksumsPath -UseBasicParsing
 } catch {
-  Write-Error "download failed: $_`nURL: $Url`nTip: no Release asset yet — use: bunx --package masralai/nexus nexus  or  irm https://raw.githubusercontent.com/masralai/nexus/main/scripts/install.ps1 | iex"
+  Write-Error "download failed: $_`nURL: $Url`nTip: no Release assets yet (need $Asset and checksums.txt). Use: bunx --package masralai/nexus nexus"
   exit 1
 }
 
-# Ensure bin is on PATH for current session
+$Line = Select-String -Path $ChecksumsPath -Pattern ("^\s*([a-fA-F0-9]{64})\s+\*?" + [regex]::Escape($Asset) + "$") | Select-Object -First 1
+if (-not $Line) {
+  Write-Error "nexus: no checksum for $Asset in checksums.txt"
+  exit 1
+}
+$Want = ($Line.Matches[0].Groups[1].Value).ToLower()
+$Got = (Get-FileHash -Algorithm SHA256 -Path $Dest).Hash.ToLower()
+if ($Want -ne $Got) {
+  Write-Error "nexus: checksum mismatch for $Asset"
+  exit 1
+}
+Write-Host "verified $Asset"
+Remove-Item $ChecksumsPath -Force -ErrorAction SilentlyContinue
+
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($UserPath -notlike "*$BinDir*") {
   [Environment]::SetEnvironmentVariable("Path", "$UserPath;$BinDir", "User")

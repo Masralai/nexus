@@ -8,20 +8,76 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            out: nexus-linux-amd64
+          - os: ubuntu-24.04-arm
+            target: bun-linux-arm64
+            out: nexus-linux-arm64
+          - os: macos-latest
+            target: bun-darwin-x64
+            out: nexus-darwin-amd64
+          - os: macos-latest
+            target: bun-darwin-arm64
+            out: nexus-darwin-arm64
+          - os: windows-latest
+            target: bun-windows-x64
+            out: nexus-windows-amd64.exe
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - run: bun install
-      - run: bun run build:compile
-      - run: cp dist/nexus nexus-linux-amd64
+      - run: bun install --frozen-lockfile
+        shell: bash
+      - name: Build binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          bun build --compile --target=${{ matrix.target }} ./src/cli/main.ts --outfile "dist/${{ matrix.out }}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.out }}
+          path: dist/${{ matrix.out }}
+
+  release:
+    name: release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Prepare release files
+        run: |
+          ls -la artifacts
+          cp artifacts/nexus-linux-amd64 .
+          cp artifacts/nexus-linux-arm64 .
+          cp artifacts/nexus-darwin-amd64 .
+          cp artifacts/nexus-darwin-arm64 .
+          cp artifacts/nexus-windows-amd64.exe .
+          sha256sum nexus-linux-amd64 nexus-linux-arm64 nexus-darwin-amd64 nexus-darwin-arm64 nexus-windows-amd64.exe > checksums.txt
+          cat checksums.txt
       - name: Read parity pin
         run: echo "PARITY_PIN=$(jq -r '.pin.implementation + \" \" + .pin.version + \" (\" + .pin.commit + \")\"' fixtures/parity/read-file.json)" >> "$GITHUB_ENV"
       - uses: softprops/action-gh-release@v2
         with:
-          files: nexus-linux-amd64
+          files: |
+            nexus-linux-amd64
+            nexus-linux-arm64
+            nexus-darwin-amd64
+            nexus-darwin-arm64
+            nexus-windows-amd64.exe
+            checksums.txt
           body: |
             Parity reference: ${{ env.PARITY_PIN }}
         env:
