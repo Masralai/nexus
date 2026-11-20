@@ -1,0 +1,18 @@
+{
+  "pin": {
+    "implementation": "reference",
+    "version": "2.1.2",
+    "commit": "f7d5b6ffc4"
+  },
+  "kind": "structural",
+  "provenance": "reference.json is a structural golden for Tier 1 replay: expected part order, tool sequence, step count and final status for this fixture. Regenerate it from a real reference export with scripts/parity-record.ts at release (see README).",
+  "prompt": "Read a.txt and reply with its contents.",
+  "workspace": {
+    "a.txt": "hello parity\n"
+  },
+  "streams": [
+    "providers/openai-compatible/tool-calls.sse",
+    "providers/openai-compatible/text-stream.sse"
+  ],
+  "reference": "reference.json"
+}

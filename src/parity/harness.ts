@@ -1,7 +1,7 @@
 /**
  * Structural comparison for replayed agent transcripts. The producers are
  * intentionally external: the release harness feeds the same fixture to Nexus
- * and to the pinned opencode black box, then compares the two JSON transcripts.
+ * and to the pinned reference black box, then compares the two JSON transcripts.
  */
 
 export interface Transcript {

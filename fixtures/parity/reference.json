@@ -1,0 +1,9 @@
+{
+  "events": [
+    { "type": "toolCallStarted", "name": "read" },
+    { "type": "toolResult", "name": "read" },
+    { "type": "runComplete", "steps": 1 }
+  ],
+  "parts": [{ "type": "text" }, { "type": "tool_call" }, { "type": "tool_result" }, { "type": "text" }],
+  "status": "runComplete"
+}

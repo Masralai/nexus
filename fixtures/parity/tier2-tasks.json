@@ -1,0 +1,11 @@
+{
+  "pin": {
+    "implementation": "reference",
+    "version": "2.1.2",
+    "commit": "f7d5b6ffc4"
+  },
+  "runs": 3,
+  "tasks": [
+    { "id": "read-file", "prompt": "Read a.txt and reply with its contents." }
+  ]
+}
