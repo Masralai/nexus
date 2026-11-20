@@ -26,13 +26,13 @@ test("gateToolCall asks then honors callback", async () => {
     rules: {},
     id: "1",
     name: "bash",
-    input: { command: "ls" },
-    reason: "ls",
+    input: { command: "npm install" },
+    reason: "npm install",
     onAsk: (r) => asks.push(r.reason),
     askPermission: async () => true,
   })
   expect(ok).toBe(true)
-  expect(asks).toEqual(["ls"])
+  expect(asks).toEqual(["npm install"])
 })
 
 test("gateToolCall denies without asking", async () => {

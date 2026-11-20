@@ -28,7 +28,7 @@ export interface ServerTurnOptions {
   after: number
   signal?: AbortSignal
   onEvent: (event: EngineEvent) => void
-  onPermission: (request: { id: string; name: string; input: unknown; reason: string }) => Promise<boolean>
+  onPermission: (request: { id: string; name: string; input: unknown; reason: string }) => Promise<boolean | "always">
   onQuestion: (requestID: string, questions: QuestionPrompt[]) => Promise<QuestionAnswer[]>
 }
 
@@ -47,8 +47,8 @@ export async function runServerTurn(client: ServerTurnClient, opts: ServerTurnOp
         input: event.data.input,
         reason: String(event.data.reason ?? ""),
       }
-      const ok = await opts.onPermission(request)
-      await client.replyPermission(opts.sessionID, request.id, ok ? "once" : "deny")
+      const reply = await opts.onPermission(request)
+      await client.replyPermission(opts.sessionID, request.id, reply === "always" ? "always" : reply ? "once" : "deny")
       continue
     }
     if (event.type === "questionRequest") {

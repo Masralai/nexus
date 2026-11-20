@@ -180,14 +180,7 @@ function Row({
 
   switch (block.kind) {
     case "splash":
-      return line === "Nexus" ? (
-        <Text color={t.gold} bold>
-          {" "}
-          {line}
-        </Text>
-      ) : (
-        <Text color={t.boneDim}> {line}</Text>
-      )
+      return <Text color={t.gold}>{line}</Text>
     case "user":
       return (
         <Text>

@@ -170,7 +170,7 @@ test("runs reads in parallel, mutators sequentially", async () => {
       toolCalls: [
         { id: "r1", name: "read", input: "r1" },
         { id: "r2", name: "read", input: "r2" },
-        { id: "b1", name: "bash", input: { command: "b1" } },
+        { id: "b1", name: "bash", input: { command: "rm -rf /tmp/x" } },
       ],
     },
     { content: "done" },
@@ -251,10 +251,20 @@ test("plan mode blocks write without asking", async () => {
 })
 
 test("grants bash via askPermission callback", async () => {
-  const provider = new MockProvider([{ toolCalls: [{ id: "b1", name: "bash", input: { command: "ls" } }] }, { content: "ok" }])
+  const provider = new MockProvider([{ toolCalls: [{ id: "b1", name: "bash", input: { command: "npm install" } }] }, { content: "ok" }])
   const evts = await collect(
     run([{ role: "user", content: "go" }], cfg({ provider, registry: new Map([["bash", echo]]), askPermission: async () => true })),
   )
+  const tr = evts.find((e) => e.type === "toolResult") as { result: { ok: boolean } }
+  expect(tr.result.ok).toBe(true)
+})
+
+test("allows read-only bash without asking", async () => {
+  const provider = new MockProvider([{ toolCalls: [{ id: "b1", name: "bash", input: { command: "pwd" } }] }, { content: "ok" }])
+  const evts = await collect(
+    run([{ role: "user", content: "go" }], cfg({ provider, registry: new Map([["bash", echo]]) })),
+  )
+  expect(evts.some((e) => e.type === "permissionRequest")).toBe(false)
   const tr = evts.find((e) => e.type === "toolResult") as { result: { ok: boolean } }
   expect(tr.result.ok).toBe(true)
 })

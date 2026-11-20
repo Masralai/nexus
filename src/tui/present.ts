@@ -3,8 +3,17 @@ import type { Message } from "../engine/types"
 import { assistantPlainLines } from "./markdown"
 import { HISTORY_LIMIT } from "./history"
 
+export const NEXUS_BANNER_LINES = [
+  " ███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗",
+  " ████╗  ██║██╔════╝╚██╗██╔╝██║   ██║██╔════╝",
+  " ██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║███████╗",
+  " ██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║╚════██║",
+  " ██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝███████║",
+  " ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝",
+]
+
 export type StreamBlock =
-  | { kind: "splash" }
+  | { kind: "splash"; text?: string }
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
   | { kind: "fence"; text: string }
@@ -327,7 +336,7 @@ export function linesOf(block: StreamBlock, cols: number): string[] {
   const inner = Math.max(1, cols - USER_GUTTER)
   switch (block.kind) {
     case "splash":
-      return ["Nexus"]
+      return block.text != null ? block.text.split("\n") : [...NEXUS_BANNER_LINES]
     case "user":
       return wrapLines(block.text, inner)
     case "assistant":
@@ -355,7 +364,7 @@ function clipBlock(block: StreamBlock, sliced: string[]): StreamBlock {
   const text = sliced.join("\n")
   switch (block.kind) {
     case "splash":
-      return { kind: "splash" }
+      return { kind: "splash", text }
     case "aborted":
       return { kind: "aborted" }
     case "user":

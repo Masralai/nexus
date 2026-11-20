@@ -8,6 +8,7 @@ import {
   interpolatedOffset,
   linesOf,
   maxStart,
+  NEXUS_BANNER_LINES,
   present,
   reduceChrome,
   scrollStep,
@@ -35,6 +36,7 @@ function input(partial: Partial<PresentInput> = {}): PresentInput {
 test("empty session presents splash and header chrome", () => {
   const v = present(input())
   expect(v.stream).toEqual([{ kind: "splash" }])
+  expect(linesOf({ kind: "splash" }, 80)).toEqual([...NEXUS_BANNER_LINES])
   expect(v.footer).toEqual({
     mode: "build",
     model: "claude-opus",
@@ -151,6 +153,7 @@ test("logs error and aborted trail the stream; splash stays without messages", (
     { kind: "error", text: "boom" },
     { kind: "aborted" },
   ])
+  expect(linesOf({ kind: "splash" }, 80)).toEqual([...NEXUS_BANNER_LINES])
 })
 
 test("header reflects plan mode, skills, ctx, and disconnected", () => {

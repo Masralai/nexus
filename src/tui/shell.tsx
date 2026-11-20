@@ -46,7 +46,7 @@ type Overlay =
       then: (id: string) => void
     }
   | { kind: "line"; label: string; mask?: boolean; then: (v: string) => void }
-  | { kind: "permission"; name: string; reason: string; input: unknown; resolve: (ok: boolean) => void }
+  | { kind: "permission"; name: string; reason: string; input: unknown; resolve: (reply: boolean | "always") => void }
 
 export function Shell({ client }: { client: NexusClient }) {
   const { exit } = useApp()
@@ -108,7 +108,9 @@ export function Shell({ client }: { client: NexusClient }) {
   const rows = stdout?.rows ?? 24
   const FOOTER_ROWS = 3
   const COMPOSER_ROWS = 3
-  const streamH = Math.max(4, rows - FOOTER_ROWS - COMPOSER_ROWS)
+  const opening = messages.length === 0 && !busy
+  const topPad = opening && rows > 10 ? 1 : 0
+  const streamH = Math.max(4, rows - FOOTER_ROWS - COMPOSER_ROWS - topPad)
   const t = theme()
 
   const shown = present({
@@ -570,15 +572,15 @@ export function Shell({ client }: { client: NexusClient }) {
         signal: ac.signal,
         onEvent: (event) => setLive((state) => reduceEvent(state, event)),
         onPermission: (request) =>
-          new Promise<boolean>((resolve) =>
+          new Promise<boolean | "always">((resolve) =>
             setOverlay({
               kind: "permission",
               name: request.name,
               reason: request.reason,
               input: request.input,
-              resolve: (ok) => {
+              resolve: (reply) => {
                 setOverlay(null)
-                resolve(ok)
+                resolve(reply)
               },
             }),
           ),
@@ -926,6 +928,7 @@ export function Shell({ client }: { client: NexusClient }) {
 
   return (
     <Box flexDirection="column" width={cols}>
+      {topPad ? <Box height={1} /> : null}
       <Stream blocks={windowed} height={streamH} busy={busy} t={t} cols={cols} anchor={selAnchor} active={selActive} />
       <Box marginTop={1}>
         {overlay?.kind === "picker" ? (

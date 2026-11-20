@@ -20,10 +20,11 @@ import {
 import type { Message } from "./types"
 
 test("decide: default asks mutators, allows readonly in cwd", () => {
-  const rules: PermissionRules = {}
-  expect(decide(rules, "bash", "ls")).toBe("ask")
-  expect(decide(rules, "write", "x")).toBe("ask")
+  const rules = {}
+  expect(decide(rules, "bash", "rm -rf /")).toBe("ask")
+  expect(decide(rules, "edit", "x")).toBe("ask")
   expect(decide(rules, "read", "x", { readonly: true })).toBe("allow")
+  expect(decide(rules, "bash", "pwd", { cwd: "/proj" })).toBe("allow")
 })
 
 test("decide: deny wins over allow, patterns beat tool lists", () => {
@@ -33,7 +34,7 @@ test("decide: deny wins over allow, patterns beat tool lists", () => {
     denyPatterns: [/rm -rf/],
   }
   expect(decide(rules, "bash", "rm -rf /")).toBe("deny")
-  expect(decide(rules, "bash", "ls")).toBe("allow")
+  expect(decide(rules, "bash", "npm install")).toBe("allow")
   expect(decide(rules, "read", "x", { readonly: true })).toBe("deny")
 })
 
