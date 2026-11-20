@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { Box, Text, useApp, useInput, useStdout } from "ink"
-import { hasResolvableKey, loadConfig } from "../cli/config"
-import { expandCommand, findAgent, findCommand, configuredCommands, type ResolvedAgent } from "../cli/commands"
+import { expandCommand, type ResolvedAgent } from "../cli/commands"
+import type { NexusConfig } from "../cli/config"
 import type { Message } from "../engine/types"
 import type { AgentMode } from "../engine/mode"
 import { NexusClient } from "../sdk/client"
@@ -58,12 +58,14 @@ export function Shell({ client }: { client: NexusClient }) {
   const [busy, setBusy] = useState(false)
   const [busySince, setBusySince] = useState<number | undefined>(undefined)
   const [tick, setTick] = useState(0)
-  const [live, setLive] = useState<TUIState>(() => initialTUIState(loadConfig().model || "?"))
+  const [live, setLive] = useState<TUIState>(() => initialTUIState("?"))
   const [overlay, setOverlay] = useState<Overlay>(null)
   const [log, setLog] = useState<string[]>([])
   const [mode, setMode] = useState<AgentMode>("build")
   const [activeSkills, setActiveSkills] = useState<Skill[]>([])
   const [activeAgent, setActiveAgent] = useState<ResolvedAgent | null>(null)
+  const [bootstrap, setBootstrap] = useState<{ model: string; preset?: string; commands: Array<{ name: string; description?: string; template: string; agent?: string; model?: string }>; agents: Array<{ id: string; description?: string; mode?: AgentMode; model?: string; prompt?: string; tools?: string[]; builtin?: boolean }>; providers: Array<{ id: string; configured?: boolean; requiresKey?: boolean; models?: string[] }> }>({ model: "?", commands: [], agents: [], providers: [] })
+  const [bootLoaded, setBootLoaded] = useState(false)
   const acRef = useRef<AbortController | null>(null)
   const [selAnchor, setSelAnchor] = useState<SelectionAnchor | undefined>()
   const [selActive, setSelActive] = useState<SelectionAnchor | undefined>()
@@ -78,7 +80,28 @@ export function Shell({ client }: { client: NexusClient }) {
     pushLog("aborted turn")
   }
 
-  const needKey = !hasResolvableKey()
+  async function refreshBootstrap() {
+    try {
+      const [cfg, commands, agents, providers] = await Promise.all([
+        client.config() as Promise<NexusConfig>,
+        client.commands() as Promise<typeof bootstrap.commands>,
+        client.agents() as Promise<typeof bootstrap.agents>,
+        client.providers() as Promise<typeof bootstrap.providers>,
+      ])
+      const model = cfg.model || "?"
+      setBootstrap({ model, preset: cfg.preset, commands: commands ?? [], agents: agents ?? [], providers: providers ?? [] })
+      setBootLoaded(true)
+      setLive((s) => (s.status.model === "?" ? { ...s, status: { ...s.status, model } } : s))
+      return { cfg, commands, agents, providers }
+    } catch (error) {
+      setBootLoaded(true)
+      pushLog(`bootstrap failed: ${error instanceof Error ? error.message : String(error)}`)
+      return null
+    }
+  }
+
+  const activeProvider = bootstrap.providers.find((p) => p.id === bootstrap.preset)
+  const needKey = bootLoaded && !!activeProvider && !!activeProvider.requiresKey && activeProvider.configured === false
   const slashMatches = filterSlashCommands(chrome.input)
   const slashOpen = !overlay && !busy && chrome.input.startsWith("/")
   const cols = stdout?.columns ?? 80
@@ -102,9 +125,14 @@ export function Shell({ client }: { client: NexusClient }) {
   })
 
   useEffect(() => {
-    if (needKey) startKeyFlow()
+    void refreshBootstrap()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    if (needKey && !overlay) startKeyFlow()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needKey, bootLoaded])
 
   useEffect(() => {
     if (busySince === undefined) return
@@ -209,7 +237,7 @@ export function Shell({ client }: { client: NexusClient }) {
                     mask: true,
                     then: (apiKey) => {
                       const preset = otherPreset(customId.trim() || "custom", baseUrl.trim())
-                      const model = loadConfig().model
+                      const model = bootstrap.model && bootstrap.model !== "?" ? bootstrap.model : ""
                       void (async () => {
                         try {
                           pushLog(`verifying key (${preset.id})…`)
@@ -226,9 +254,10 @@ export function Shell({ client }: { client: NexusClient }) {
                             apiKey,
                             ...(model ? { model } : {}),
                           })
+                          await refreshBootstrap()
                           setOverlay(null)
                           pushLog(`connected: ${preset.id}`)
-                          setLive((s) => ({ ...s, status: { ...s.status, model: model || "?" } }))
+                          setLive((s) => ({ ...s, status: { ...s.status, model: model || bootstrap.model || "?" } }))
                         } catch (error) {
                           setOverlay(null)
                           pushLog(`connect failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -254,7 +283,7 @@ export function Shell({ client }: { client: NexusClient }) {
               setOverlay(null)
               return
             }
-            const model = loadConfig().model || preset.suggestedModels[0] || ""
+            const model = (bootstrap.model && bootstrap.model !== "?" ? bootstrap.model : "") || preset.suggestedModels[0] || ""
             void (async () => {
               try {
                 if (key) {
@@ -272,9 +301,10 @@ export function Shell({ client }: { client: NexusClient }) {
                   ...(preset.baseUrl ? { baseUrl: preset.baseUrl } : {}),
                   ...(model ? { model } : {}),
                 })
+                await refreshBootstrap()
                 setOverlay(null)
                 pushLog(`connected: ${preset.label}`)
-                setLive((s) => ({ ...s, status: { ...s.status, model: model || "?" } }))
+                setLive((s) => ({ ...s, status: { ...s.status, model: model || bootstrap.model || "?" } }))
               } catch (error) {
                 setOverlay(null)
                 pushLog(`connect failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -287,9 +317,8 @@ export function Shell({ client }: { client: NexusClient }) {
   }
 
   function startModelFlow() {
-    const c = loadConfig()
-    const preset = getPreset(c.preset)
-    const suggested = preset?.suggestedModels ?? []
+    const provider = bootstrap.providers.find((p) => p.id === bootstrap.preset)
+    const suggested = (provider?.models as string[] | undefined) ?? getPreset(bootstrap.preset ?? "")?.suggestedModels ?? []
     setOverlay({
       kind: "picker",
       title: "Select model (/model)",
@@ -303,7 +332,8 @@ export function Shell({ client }: { client: NexusClient }) {
               const model = m.trim()
               void client
                 .updateConfig({ model })
-                .then(() => {
+                .then(async () => {
+                  await refreshBootstrap()
                   setOverlay(null)
                   pushLog(`model: ${model}`)
                   setLive((s) => ({ ...s, status: { ...s.status, model } }))
@@ -318,8 +348,9 @@ export function Shell({ client }: { client: NexusClient }) {
         }
         void client
           .updateConfig({ model: id })
-          .then(() => {
+          .then(async () => {
             setOverlay(null)
+            await refreshBootstrap()
             pushLog(`model: ${id}`)
             setLive((s) => ({ ...s, status: { ...s.status, model: id } }))
           })
@@ -512,7 +543,7 @@ export function Shell({ client }: { client: NexusClient }) {
     setMessages((current) => [...current, { role: "user" as const, content: userText }])
     setBusy(true)
     setBusySince(Date.now())
-    setLive(initialTUIState(selectedAgent?.config.model ?? (loadConfig().model || "?")))
+    setLive(initialTUIState(selectedAgent?.config.model ?? (bootstrap.model !== "?" ? bootstrap.model : "?")))
     const ac = new AbortController()
     acRef.current = ac
     let sid = sessionRef.current
@@ -600,7 +631,7 @@ export function Shell({ client }: { client: NexusClient }) {
   function handleSlash(raw: string) {
     const cmd = parseSlash(raw)
     if (cmd === "help") {
-      const custom = configuredCommands(loadConfig())
+      const custom = bootstrap.commands
       pushLog(
         custom.length
           ? `${HELP}\n\ncustom:\n${custom.map((c) => `/${c.name.padEnd(7)} ${c.description ?? c.template.slice(0, 60)}`).join("\n")}`
@@ -626,16 +657,28 @@ export function Shell({ client }: { client: NexusClient }) {
       setActiveAgent(null)
       setLog([])
       setChrome((c) => ({ ...initialChrome(), history: c.history }))
-      setLive(initialTUIState(loadConfig().model || "?"))
+      setLive(initialTUIState(bootstrap.model || "?"))
     } else {
-      const cfg = loadConfig()
-      const custom = findCommand(cfg, cmd)
+      const custom = bootstrap.commands.find((c) => c.name.toLowerCase() === cmd)
       if (custom) {
         const args = parseSlashArgs(raw)
-        const agent = custom.agent ? findAgent(cfg, custom.agent) : undefined
-        if (custom.agent && !agent) {
-          pushLog(`unknown agent: ${custom.agent} — command /${custom.name} not run`)
-          return
+        let agent: ResolvedAgent | undefined
+        if (custom.agent) {
+          const found = bootstrap.agents.find((a) => a.id.toLowerCase() === custom.agent!.toLowerCase() && !a.builtin)
+          if (!found) {
+            pushLog(`unknown agent: ${custom.agent} — command /${custom.name} not run`)
+            return
+          }
+          agent = {
+            id: found.id,
+            config: {
+              ...(found.description ? { description: found.description } : {}),
+              ...(found.mode ? { mode: found.mode } : {}),
+              ...(found.model ? { model: found.model } : {}),
+              ...(found.prompt ? { prompt: found.prompt } : {}),
+              ...(found.tools ? { tools: found.tools } : {}),
+            },
+          }
         }
         const text = expandCommand(custom.template, args)
         if (!text) {
