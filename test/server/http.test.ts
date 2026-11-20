@@ -9,6 +9,7 @@ import { SQLiteStore } from "../../src/engine/sqlite"
 import { PluginRegistry } from "../../src/plugins/hooks"
 import { MockProvider, type MockResponse } from "../../src/providers/mock"
 import { startServer, type ServerHandle } from "../../src/server/server"
+import { MemoryPtyTickets, type PtyTicketStore } from "../../src/server/pty-ticket"
 import { question } from "../../src/tools/question"
 
 function testConfig(over: Partial<NexusConfig> = {}): NexusConfig {
@@ -147,6 +148,7 @@ async function withServer(
     title?: MockResponse[]
     controls?: RuntimeControls
     plugins?: PluginRegistry
+    tickets?: PtyTicketStore
   },
   run: (ctx: TestServer) => Promise<void>,
 ): Promise<void> {
@@ -161,6 +163,7 @@ async function withServer(
     ...(opts.controls ? { controls: opts.controls } : {}),
     registry: new Map((opts.tools ?? []).map((tool) => [tool.name, tool])),
     store,
+    ...(opts.tickets ? { tickets: opts.tickets } : {}),
   }
   const configPath = join(dir, "home", ".nexus.json")
   const credentialsPath = join(dir, "home", ".nexus", "credentials.json")
@@ -887,7 +890,7 @@ test("updates config and credentials over HTTP", async () => {
 })
 
 test("manages PTY and persistent terminal sessions over HTTP", async () => {
-  await withServer({ controls: fakeControls(tmpdir()) }, async ({ server }) => {
+  await withServer({ controls: fakeControls(tmpdir()), tickets: new MemoryPtyTickets() }, async ({ server }) => {
     const created = await post(server, "/api/pty", { title: "demo", command: "cat" })
     expect(created.status).toBe(201)
     const { data: pty } = await json<{ data: PtyInfo }>(created)
@@ -965,12 +968,20 @@ test("manages PTY and persistent terminal sessions over HTTP", async () => {
       await call(server, `/api/experimental/session/${session.data.id}/terminal/read?lines=1`),
     )
     expect(read.data.screen.text).toBe("two")
-    const snapshot = await json<{ data: { info: PtyInfo; text: string } }>(
-      await call(server, `/api/experimental/persistent-pty/${terminal.data.id}/snapshot`),
-    )
+    const snapshot = await json<{
+      data: { info: PtyInfo; text: string; checkpoint: string; cursor: { x: number; y: number }; screen: { cols: number; rows: number } }
+    }>(await call(server, `/api/experimental/persistent-pty/${terminal.data.id}/snapshot`))
     expect(snapshot.data.info.id).toBe(terminal.data.id)
     expect(snapshot.data.text).toBe("one\ntwo\n")
-    expect((await call(server, "/api/experimental/persistent-pty/handoff", { method: "POST" })).status).toBe(200)
+    expect(snapshot.data.checkpoint).toBe(String("one\ntwo\n".length))
+    expect(snapshot.data.cursor.y).toBeGreaterThanOrEqual(0)
+    expect(snapshot.data.screen).toMatchObject({ cols: 120, rows: 40 })
+    const handoff = await call(server, `/api/experimental/session/${session.data.id}/persistent-pty/handoff`, { method: "POST" })
+    expect(handoff.status).toBe(200)
+    const handoffBody = await json<{ data: { handoff: { directory: string; instanceID: string; ticket: string; expiresAt: number } | null } }>(handoff)
+    expect(handoffBody.data.handoff).not.toBeNull()
+    expect(handoffBody.data.handoff!.ticket).toEqual(expect.any(String))
+    expect(handoffBody.data.handoff!.expiresAt).toBeGreaterThan(Date.now())
 
     expect(
       (await call(server, `/api/experimental/persistent-pty/terminal_${session.data.id}`, { method: "DELETE" }))

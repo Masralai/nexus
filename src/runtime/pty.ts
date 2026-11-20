@@ -7,6 +7,8 @@ interface Shell {
   command: string
   args: string[]
   cwd: string
+  cols: number
+  rows: number
   proc: ReturnType<typeof Bun.spawn>
   terminal: Bun.Terminal
   buffer: string
@@ -35,6 +37,71 @@ function clean(text: string, command: string, marker: string): string {
   return lines.join("\n")
 }
 
+export interface ScreenState {
+  text: string
+  cursor: { x: number; y: number }
+}
+
+/** Minimal terminal screen model: line split plus cursor addressing. */
+export function screenState(text: string, cols: number, rows: number): ScreenState {
+  const cursor = trackCursor(text, cols, rows)
+  const lines = text.replace(/\r/g, "").split("\n")
+  const keep = Math.max(1, rows)
+  const screen = lines.length > keep ? lines.slice(-keep) : lines
+  return { text: screen.join("\n"), cursor }
+}
+
+function trackCursor(text: string, cols: number, rows: number): { x: number; y: number } {
+  const maxX = Math.max(0, cols - 1)
+  const maxY = Math.max(0, rows - 1)
+  let x = 0
+  let y = 0
+  for (let i = 0; i < text.length; ) {
+    const ch = text[i]
+    if (ch === "\r") {
+      x = 0
+      i += 1
+      continue
+    }
+    if (ch === "\n") {
+      x = 0
+      y = Math.min(maxY, y + 1)
+      i += 1
+      continue
+    }
+    if (ch === "\b") {
+      x = Math.max(0, x - 1)
+      i += 1
+      continue
+    }
+    if (ch === "\x1b") {
+      const seq = /^\x1b\[([0-9;]*)([A-Za-z])/.exec(text.slice(i))
+      if (!seq) {
+        x = Math.min(maxX, x + 1)
+        i += 1
+        continue
+      }
+      const nums = seq[1] ? seq[1].split(";").map((n) => (n ? Number(n) : 1)) : []
+      const a = nums[0] ?? 1
+      const b = nums[1] ?? 1
+      const mode = seq[2]
+      if (mode === "A") y = Math.max(0, y - (a || 1))
+      else if (mode === "B") y = Math.min(maxY, y + (a || 1))
+      else if (mode === "C") x = Math.min(maxX, x + (a || 1))
+      else if (mode === "D") x = Math.max(0, x - (a || 1))
+      else if (mode === "H" || mode === "f") {
+        y = Math.max(0, Math.min(maxY, (a || 1) - 1))
+        x = Math.max(0, Math.min(maxX, (b || 1) - 1))
+      }
+      i += seq[0].length
+      continue
+    }
+    x = Math.min(maxX, x + 1)
+    i += 1
+  }
+  return { x, y }
+}
+
 function shellFor(
   shells: Map<string, Shell>,
   key: string,
@@ -46,9 +113,11 @@ function shellFor(
   if (existing) shells.delete(key)
   const bufferRef = { value: "" }
   const pending: Shell["waiters"] = []
+  const cols = opts.cols ?? 120
+  const rows = opts.rows ?? 40
   const terminal = new Bun.Terminal({
-    cols: 120,
-    rows: 40,
+    cols,
+    rows,
     data(_term, data) {
       const text = new TextDecoder().decode(data)
       bufferRef.value += text
@@ -90,6 +159,8 @@ function shellFor(
     command,
     args,
     cwd,
+    cols,
+    rows,
     proc,
     terminal,
     get buffer() {
@@ -196,7 +267,15 @@ export class PtyManager implements PtyControl {
     const shell = this.shells.get(id)
     if (!shell) throw new Error(`pty ${id} not found`)
     if (opts.title !== undefined) shell.title = opts.title
-    if (opts.rows !== undefined && opts.cols !== undefined) shell.terminal.resize(opts.cols, opts.rows)
+    if (opts.rows !== undefined && opts.cols !== undefined) {
+      shell.cols = opts.cols
+      shell.rows = opts.rows
+      try {
+        shell.terminal.resize(opts.cols, opts.rows)
+      } catch {
+        /* best effort */
+      }
+    }
     return info(shell)
   }
 
@@ -211,6 +290,19 @@ export class PtyManager implements PtyControl {
     if (!shell) throw new Error(`pty ${id} not found`)
     const start = Math.max(0, Math.min(offset, shell.buffer.length))
     return { data: shell.buffer.slice(start), offset: shell.buffer.length }
+  }
+
+  snapshot(id: string): { text: string; cols: number; rows: number; cursor: { x: number; y: number }; checkpoint: string } {
+    const shell = this.shells.get(id)
+    if (!shell) throw new Error(`pty ${id} not found`)
+    const screen = screenState(shell.buffer, shell.cols, shell.rows)
+    return {
+      text: screen.text,
+      cols: shell.cols,
+      rows: shell.rows,
+      cursor: screen.cursor,
+      checkpoint: String(shell.buffer.length),
+    }
   }
 
   remove(id: string): void {

@@ -62,3 +62,127 @@ test("MCP SSE transport initializes, lists, and calls tools", async () => {
     server.stop(true)
   }
 })
+
+test("MCP SSE reconnects after stream drop", async () => {
+  const encoder = new TextEncoder()
+  let controller: ReadableStreamDefaultController<Uint8Array> | undefined
+  let connections = 0
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url)
+      if (url.pathname === "/sse") {
+        connections++
+        const body = new ReadableStream<Uint8Array>({
+          start(c) {
+            controller = c
+            c.enqueue(encoder.encode("event: endpoint\ndata: /messages\n\n"))
+          },
+        })
+        return new Response(body, { headers: { "content-type": "text/event-stream" } })
+      }
+      if (url.pathname === "/messages") {
+        const message = (await req.json()) as { id?: number; method?: string }
+        const reply = (result: unknown) => {
+          controller?.enqueue(encoder.encode(`data: ${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n\n`))
+        }
+        if (message.id !== undefined) {
+          if (message.method === "initialize") reply({ protocolVersion: "2024-11-05", serverInfo: { name: "stub" }, capabilities: {} })
+          else if (message.method === "tools/list") reply({ tools: [] })
+          else if (message.method === "resources/list") reply({ resources: [] })
+          else if (message.method === "prompts/list") reply({ prompts: [] })
+        }
+        return new Response(null, { status: 202 })
+      }
+      return new Response("not found", { status: 404 })
+    },
+  })
+
+  const manager = new McpManager(
+    { stub: { type: "sse", url: `http://127.0.0.1:${server.port}/sse` } },
+    process.cwd(),
+  )
+  try {
+    await manager.connect()
+    expect(manager.status()[0]).toMatchObject({ connected: true })
+    controller?.close()
+    const deadline = Date.now() + 500
+    while (Date.now() < deadline && manager.status()[0]?.connected) await Bun.sleep(10)
+    expect(manager.status()[0]?.connected).toBe(false)
+
+    await manager.connect("stub")
+    expect(manager.status()[0]).toMatchObject({ connected: true })
+    expect(connections).toBeGreaterThanOrEqual(2)
+  } finally {
+    await manager.close()
+    server.stop(true)
+  }
+})
+
+test("MCP SSE recovers from request failures", async () => {
+  const encoder = new TextEncoder()
+  let controller: ReadableStreamDefaultController<Uint8Array> | undefined
+  let fail = false
+  let connections = 0
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url)
+      if (url.pathname === "/sse") {
+        connections++
+        const body = new ReadableStream<Uint8Array>({
+          start(c) {
+            controller = c
+            c.enqueue(encoder.encode("event: endpoint\ndata: /messages\n\n"))
+          },
+        })
+        return new Response(body, { headers: { "content-type": "text/event-stream" } })
+      }
+      if (url.pathname === "/messages") {
+        if (fail) return new Response("boom", { status: 500 })
+        const message = (await req.json()) as { id?: number; method?: string; params?: { uri?: string } }
+        const reply = (result: unknown) =>
+          controller?.enqueue(encoder.encode(`data: ${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n\n`))
+        if (message.id !== undefined) {
+          if (message.method === "initialize") reply({ protocolVersion: "2024-11-05", serverInfo: { name: "stub" }, capabilities: {} })
+          else if (message.method === "tools/list") reply({ tools: [{ name: "echo", description: "Echo", inputSchema: { type: "object" } }] })
+          else if (message.method === "resources/list") reply({ resources: [{ uri: "file:///x", name: "x" }] })
+          else if (message.method === "resources/read") reply({ contents: [{ uri: message.params?.uri, text: "hi" }] })
+          else if (message.method === "prompts/list") reply({ prompts: [] })
+          else if (message.method === "tools/call") reply({ content: [{ type: "text", text: "ok" }] })
+        }
+        return new Response(null, { status: 202 })
+      }
+      return new Response("not found", { status: 404 })
+    },
+  })
+
+  const manager = new McpManager({ stub: { type: "sse", url: `http://127.0.0.1:${server.port}/sse` } }, process.cwd())
+  try {
+    await manager.connect()
+    expect(manager.status()[0]).toMatchObject({ connected: true, transport: "sse" })
+
+    fail = true
+    const result = await manager.call("stub", "echo", { value: 1 })
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain("HTTP 500")
+    expect(manager.status()[0]).toMatchObject({ connected: false })
+
+    fail = false
+    const recovered = await manager.call("stub", "echo", { value: 2 })
+    expect(recovered).toEqual({ ok: true, output: "ok" })
+    expect(manager.status()[0]).toMatchObject({ connected: true })
+    expect(connections).toBeGreaterThanOrEqual(2)
+
+    fail = true
+    await expect(manager.readResource("stub", "file:///x")).rejects.toThrow("HTTP 500")
+    expect(manager.status()[0]).toMatchObject({ connected: false })
+
+    fail = false
+    expect(await manager.readResource("stub", "file:///x")).toEqual({ contents: [{ uri: "file:///x", text: "hi" }] })
+    expect(manager.status()[0]).toMatchObject({ connected: true })
+  } finally {
+    await manager.close()
+    server.stop(true)
+  }
+})

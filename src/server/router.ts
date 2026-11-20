@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import type { NexusConfig } from "../cli/config"
 import { hasResolvableKey, loadConfig, saveConfig } from "../cli/config"
 import { setCredential } from "../cli/credentials"
+import { createProvider } from "../providers"
 import { advertiseTools, type AgentMode } from "../engine/mode"
 import type { PermissionReply } from "../engine/permission"
 import type { ImagePart, PtyCreateOptions, PtyInfo, QuestionAnswer, ToolDefinition } from "../engine/types"
@@ -434,6 +435,34 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
       return noContent()
     },
 
+    providerVerify: async ({ req }) => {
+      const input = await body(req)
+      const presetID = stringField(input, "preset", true) as string
+      const apiKey = stringField(input, "apiKey", true) as string
+      const baseUrlInput = stringField(input, "baseUrl", false)
+      const preset = getPreset(presetID) ?? (baseUrlInput ? { id: presetID, adapter: "openai-compatible" as const, baseUrl: baseUrlInput, requiresKey: true, suggestedModels: [] as string[] } : undefined)
+      if (!preset) throw badRequest(`unknown preset: ${presetID}`)
+      const baseUrl = baseUrlInput ?? ("baseUrl" in preset ? preset.baseUrl : undefined)
+      const providerID = "adapter" in preset ? preset.adapter : "openai-compatible"
+      const suggested = "suggestedModels" in preset ? preset.suggestedModels[0] : undefined
+      const model =
+        stringField(input, "model", false) ??
+        suggested ??
+        (providerID === "anthropic" ? "claude-3-5-haiku-latest" : "gpt-4o-mini")
+      try {
+        const p = createProvider({ provider: providerID, preset: presetID, model, apiKey, baseUrl, maxTokens: 8, timeoutMs: 12_000 })
+        let ok = false
+        for await (const ev of p.stream([{ role: "user", content: "Reply with pong" }], [], { timeoutMs: 12_000 })) {
+          if (ev.type === "token" || (ev.type === "done" && ev.content)) ok = true
+          if (ev.type === "done") break
+        }
+        if (!ok) return data({ ok: false, error: "no response from provider" })
+        return data({ ok: true })
+      } catch (e) {
+        return data({ ok: false, error: e instanceof Error ? e.message : String(e) })
+      }
+    },
+
     providers: () => data(PRESETS.map((preset) => providerInfo(preset, liveCfg()))),
 
     provider: ({ params }) => {
@@ -760,7 +789,8 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
       const info = control.get(ptyID)
       if (!info || !control.output) return data(null)
       const lines = positiveInt(url.searchParams.get("lines"), 0, 65_535)
-      let text = control.output(ptyID, 0).data
+      const snap = (control as { snapshot?: (id: string) => { text: string; cols: number; rows: number; cursor: { x: number; y: number } } }).snapshot?.(ptyID)
+      let text = snap?.text ?? control.output(ptyID, 0).data
       if (lines > 0) {
         const rows = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n")
         text = rows.slice(-lines).join("\n")
@@ -770,7 +800,7 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
         title: info.title,
         cwd: info.cwd,
         foregroundProcess: null,
-        screen: { text, cols: 120, rows: 40, cursor: { x: 0, y: 0 } },
+        screen: { text, cols: snap?.cols ?? 120, rows: snap?.rows ?? 40, cursor: snap?.cursor ?? { x: 0, y: 0 } },
       })
     },
 
@@ -782,7 +812,20 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
       return noContent()
     },
 
-    persistentPtyHandoff: () => data({ handoff: null }),
+    persistentPtyHandoff: async ({ params }) => {
+      const control = managedPty(service)
+      const ptyID = `terminal_${params.sessionID}`
+      const info = control.get(ptyID)
+      const handoff = options.tickets
+        ? {
+            directory: info?.cwd ?? ".",
+            instanceID: String(process.pid),
+            ticket: options.tickets.issue(ptyID).ticket,
+            expiresAt: Date.now() + 30_000,
+          }
+        : null
+      return data({ handoff })
+    },
 
     persistentPtyCreate: async ({ req, params }) => {
       const session = service.get(params.sessionID)
@@ -810,12 +853,15 @@ export function createRouter(options: RouterOptions): (req: Request) => Promise<
     persistentPtySnapshot: ({ url, params }) => {
       const info = managedPty(service).get(params.ptyID)
       if (!info) throw notFound(`pty ${params.ptyID} not found`)
-      const output = managedPty(service).output?.(params.ptyID, 0)
+      const control = managedPty(service) as { output?: (id: string, offset?: number) => { data: string; offset: number }; snapshot?: (id: string) => { text: string; cols: number; rows: number; cursor: { x: number; y: number }; checkpoint: string } }
+      const snap = control.snapshot?.(params.ptyID)
+      const output = control.output?.(params.ptyID, 0)
       return located(locationDirectory(url, defaultCwd), {
         info,
-        text: output?.data ?? "",
-        checkpoint: "",
-        cursor: { x: 0, y: 0 },
+        text: snap?.text ?? output?.data ?? "",
+        screen: snap ? { text: snap.text, cols: snap.cols, rows: snap.rows, cursor: snap.cursor } : { text: output?.data ?? "", cols: 120, rows: 40, cursor: { x: 0, y: 0 } },
+        checkpoint: snap?.checkpoint ?? String((output?.data ?? "").length),
+        cursor: snap?.cursor ?? { x: 0, y: 0 },
       })
     },
 

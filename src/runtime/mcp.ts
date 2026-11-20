@@ -252,15 +252,21 @@ class HttpClient implements Client {
   }
 
   async notify(method: string, params?: unknown): Promise<void> {
-    await fetch(this.config.url!, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(this.sessionId ? { "Mcp-Session-Id": this.sessionId } : {}),
-        ...(this.config.headers ?? {}),
-      },
-      body: JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }),
-    })
+    try {
+      await fetch(this.config.url!, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.sessionId ? { "Mcp-Session-Id": this.sessionId } : {}),
+          ...(this.config.headers ?? {}),
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }),
+      })
+    } catch (e) {
+      this.connected = false
+      this.error = e instanceof Error ? e.message : String(e)
+      throw e
+    }
   }
 
   async initialize(): Promise<void> {
@@ -365,6 +371,8 @@ class SseClient implements Client {
       if (msg.error) waiter.reject(rpcError(msg.error))
       else waiter.resolve(msg.result)
     }
+    // Stream ended: treat as disconnect unless explicitly closed.
+    if (!this.controller.signal.aborted) throw new Error(`mcp server ${this.name}: SSE stream closed`)
   }
 
   private async post(payload: unknown): Promise<Response> {
@@ -416,6 +424,12 @@ class SseClient implements Client {
         clearTimeout(waiter.timer)
         waiter.reject(error instanceof Error ? error : new Error(String(error)))
         this.pending.delete(id)
+      }
+      // Reject endpoint waiters so pending connect/requests don't hang forever.
+      try {
+        ;(this as unknown as { resolveEndpoint?: () => void }).resolveEndpoint?.()
+      } catch {
+        /* ignore */
       }
     })
     const result = (await this.request("initialize", {
@@ -486,12 +500,21 @@ export class McpManager implements McpControl {
       if (!cfg) throw new Error(`unknown mcp server: ${name}`)
       const existing = this.clients.get(name)
       if (existing?.connected) return
-      if (existing) await existing.close()
+      if (existing) {
+        try {
+          await existing.close()
+        } catch {
+          /* stale client */
+        }
+        this.clients.delete(name)
+      }
       const client = this.create(name, cfg)
       this.clients.set(name, client)
       try {
         await client.initialize()
+        client.error = undefined
       } catch (e) {
+        client.connected = false
         client.error = e instanceof Error ? e.message : String(e)
         throw e
       }
@@ -540,7 +563,15 @@ export class McpManager implements McpControl {
   }
 
   async call(server: string, name: string, input: unknown): Promise<ToolResult> {
-    const client = this.clients.get(server)
+    let client = this.clients.get(server)
+    if (!client?.connected) {
+      try {
+        await this.connect(server)
+        client = this.clients.get(server)
+      } catch (e) {
+        return { ok: false, output: "", error: e instanceof Error ? e.message : String(e) }
+      }
+    }
     if (!client?.connected) return { ok: false, output: "", error: `mcp server not connected: ${server}` }
     try {
       const result = (await client.request("tools/call", { name, arguments: input ?? {} })) as {
@@ -556,7 +587,9 @@ export class McpManager implements McpControl {
       if (result.structuredContent !== undefined) parts.push(JSON.stringify(result.structuredContent))
       return { ok: !result.isError, output: parts.join("\n") }
     } catch (e) {
-      return { ok: false, output: "", error: e instanceof Error ? e.message : String(e) }
+      client.connected = false
+      client.error = e instanceof Error ? e.message : String(e)
+      return { ok: false, output: "", error: client.error }
     }
   }
 
@@ -567,9 +600,19 @@ export class McpManager implements McpControl {
   }
 
   async readResource(server: string, uri: string): Promise<unknown> {
-    const client = this.clients.get(server)
+    let client = this.clients.get(server)
+    if (!client?.connected) {
+      await this.connect(server)
+      client = this.clients.get(server)
+    }
     if (!client?.connected) throw new Error(`mcp server not connected: ${server}`)
-    return client.request("resources/read", { uri })
+    try {
+      return await client.request("resources/read", { uri })
+    } catch (e) {
+      client.connected = false
+      client.error = e instanceof Error ? e.message : String(e)
+      throw e
+    }
   }
 
   async prompts(server?: string): Promise<Array<{ server: string; name: string; description?: string }>> {
@@ -579,9 +622,19 @@ export class McpManager implements McpControl {
   }
 
   async getPrompt(server: string, name: string, args?: Record<string, string>): Promise<unknown> {
-    const client = this.clients.get(server)
+    let client = this.clients.get(server)
+    if (!client?.connected) {
+      await this.connect(server)
+      client = this.clients.get(server)
+    }
     if (!client?.connected) throw new Error(`mcp server not connected: ${server}`)
-    return client.request("prompts/get", { name, arguments: args ?? {} })
+    try {
+      return await client.request("prompts/get", { name, arguments: args ?? {} })
+    } catch (e) {
+      client.connected = false
+      client.error = e instanceof Error ? e.message : String(e)
+      throw e
+    }
   }
 
   status(): Array<{ name: string; connected: boolean; error?: string; transport: string }> {

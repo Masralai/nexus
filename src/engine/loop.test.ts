@@ -605,6 +605,27 @@ test("read _raw hint surfaces helpful error", async () => {
   expect(res.error).toContain("Emit N separate read calls")
 })
 
+test("malformed tool args surface a correctable tool error", async () => {
+  const provider = new MockProvider([
+    { toolCalls: [{ id: "c1", name: "echo", input: { _raw: "not json", _parseError: "Invalid JSON for tool args" } }] },
+    { content: "fixed" },
+  ])
+  const evts = await collect(
+    run([{ role: "user", content: "go" }], cfg({
+      provider,
+      registry: new Map([["echo", echo]]),
+      autoApprove: true,
+    })),
+  )
+  const result = evts.find((e) => e.type === "toolResult") as { result: { ok: boolean; error?: string } } | undefined
+  expect(result?.result.ok).toBe(false)
+  expect(result?.result.error).toContain("invalid tool arguments for echo")
+  expect(result?.result.error).toContain("Invalid JSON for tool args")
+  expect(result?.result.error).toContain("raw: not json")
+  expect(result?.result.error).toContain("Provide a single valid JSON object for this call.")
+  expect(evts.at(-1)).toEqual({ type: "runComplete", steps: 1, result: "fixed" })
+})
+
 test("task explore blocks mutating tools", async () => {
   const { task } = await import("../tools/task")
   const provider = new MockProvider([

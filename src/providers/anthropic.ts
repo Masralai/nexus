@@ -9,6 +9,8 @@ export interface AnthropicConfig {
   apiKey: string
   model: string
   contextWindow: number
+  /** Override for Anthropic-compatible endpoints (e.g. provider proxies). */
+  baseUrl?: string
   /** Anthropic requires an output token limit on every request. */
   maxTokens?: number
   /** Wall-clock limit for one streaming request. Timeouts stay distinct from aborts. */
@@ -94,7 +96,9 @@ export class Anthropic implements Provider {
 
   async *stream(messages: Message[], tools: ToolDefinition[], opts: StreamOptions): AsyncIterable<ProviderEvent> {
     const signal = requestSignal(opts.signal, opts.timeoutMs ?? this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS)
-    const res = await fetchWithRetry(this.fetchImpl, "anthropic", "https://api.anthropic.com/v1/messages", {
+    const base = (this.cfg.baseUrl ?? "https://api.anthropic.com").replace(/\/$/, "")
+    const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`
+    const res = await fetchWithRetry(this.fetchImpl, "anthropic", endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": this.cfg.apiKey, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({

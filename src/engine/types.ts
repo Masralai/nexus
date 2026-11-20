@@ -192,6 +192,8 @@ export interface PtyCreateOptions {
   cwd?: string
   title?: string
   env?: Record<string, string>
+  cols?: number
+  rows?: number
 }
 
 export interface PtyControl {

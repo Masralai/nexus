@@ -418,6 +418,21 @@ export async function* run(messages: readonly Message[], cfg: RunConfig): AsyncI
         if (!tool) return { ok: false, output: "", error: `unknown tool: ${call.name}` }
         if (!grants.get(call.id)) return { ok: false, output: "", error: "permission denied" }
         if (cfg.signal?.aborted) return { ok: false, output: "", error: "aborted" }
+        if (call.input && typeof call.input === "object" && "_parseError" in (call.input as Record<string, unknown>)) {
+          const marker = call.input as { _parseError?: unknown; _raw?: unknown }
+          const detail =
+            typeof marker._parseError === "string" && marker._parseError
+              ? marker._parseError
+              : "arguments are not valid JSON"
+          const raw = typeof marker._raw === "string" ? marker._raw : undefined
+          const snippet = raw ? raw.slice(0, 200) + (raw.length > 200 ? "…" : "") : undefined
+          const hint = "Provide a single valid JSON object for this call."
+          return {
+            ok: false,
+            output: "",
+            error: `invalid tool arguments for ${call.name}: ${detail}${snippet ? `\nraw: ${snippet}` : ""}\n${hint}`,
+          }
+        }
         const ctx: ToolContext = {
           cwd,
           signal: cfg.signal,

@@ -61,6 +61,7 @@ test("presets cover curated providers", () => {
     "xai",
     "mistral",
     "cohere",
+    "commandcode",
     "ollama",
   ])
   expect(getPreset("anthropic")?.adapter).toBe("anthropic")
@@ -68,6 +69,9 @@ test("presets cover curated providers", () => {
   expect(getPreset("gemini")?.baseUrl).toContain("generativelanguage.googleapis.com")
   expect(getPreset("gemini")?.adapter).toBe("gemini")
   expect(getPreset("gemini")?.envKeys).toContain("GEMINI_API_KEY")
+  expect(getPreset("commandcode")?.baseUrl).toBe("https://api.commandcode.ai/provider/v1")
+  expect(getPreset("commandcode")?.adapter).toBe("openai-compatible")
+  expect(getPreset("commandcode")?.envKeys).toEqual(["CMD_API_KEY"])
   expect(getPreset("openai-responses")?.adapter).toBe("openai-responses")
   expect(getPreset("azure")?.adapter).toBe("azure")
   expect(getPreset("ollama")?.requiresKey).toBe(false)
@@ -91,6 +95,27 @@ test("keys never leak across presets", () => {
     else process.env.OPENAI_API_KEY = prevOpen
     if (prevDeep === undefined) delete process.env.DEEPSEEK_API_KEY
     else process.env.DEEPSEEK_API_KEY = prevDeep
+  }
+})
+
+test("command-code resolves only its own key", () => {
+  const prevOpen = process.env.OPENAI_API_KEY
+  const prevCmd = process.env.CMD_API_KEY
+  try {
+    process.env.OPENAI_API_KEY = "openai-key"
+    delete process.env.CMD_API_KEY
+    const cfg = loadConfig({ file: "/nonexistent/nexus-cfg.json" })
+    cfg.preset = "commandcode"
+    cfg.provider = "openai-compatible"
+    // A Command Code request must never carry an OpenAI key.
+    expect(resolveApiKey(cfg, "/nonexistent/credentials.json")).toBeUndefined()
+    process.env.CMD_API_KEY = "cmd-key"
+    expect(resolveApiKey(cfg, "/nonexistent/credentials.json")).toBe("cmd-key")
+  } finally {
+    if (prevOpen === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = prevOpen
+    if (prevCmd === undefined) delete process.env.CMD_API_KEY
+    else process.env.CMD_API_KEY = prevCmd
   }
 })
 

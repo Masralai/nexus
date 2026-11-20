@@ -6,8 +6,14 @@ import { MockProvider } from "./mock"
 import { getModelInfo } from "./catalog"
 import type { Provider } from "./types"
 
+function isClaudeModel(model: string): boolean {
+  const id = model.toLowerCase()
+  return id.includes("claude") || id.includes("anthropic/")
+}
+
 export function createProvider(cfg: {
   provider: string
+  preset?: string
   model: string
   apiKey?: string
   baseUrl?: string
@@ -18,6 +24,19 @@ export function createProvider(cfg: {
   if (cfg.provider === "mock") return new MockProvider()
   const info = getModelInfo(cfg.model)
   const contextWindow = cfg.contextWindow ?? info.contextWindow
+
+  // Per-model adapter override: Command Code serves Claude models over the Anthropic wire.
+  if (cfg.preset === "commandcode" && isClaudeModel(cfg.model)) {
+    return new Anthropic({
+      apiKey: cfg.apiKey ?? "",
+      model: cfg.model,
+      contextWindow,
+      baseUrl: cfg.baseUrl,
+      maxTokens: cfg.maxTokens ?? Math.min(info.maxOutput, 8_192),
+      timeoutMs: cfg.timeoutMs,
+    })
+  }
+
   if (cfg.provider === "azure") {
     if (!cfg.baseUrl) throw new Error("azure: set AZURE_OPENAI_ENDPOINT or NEXUS_BASE_URL")
     const apiVersion = process.env.AZURE_OPENAI_API_VERSION ?? "2024-10-21"
@@ -66,6 +85,7 @@ export function createProvider(cfg: {
       apiKey: cfg.apiKey ?? "",
       model: cfg.model,
       contextWindow,
+      baseUrl: cfg.baseUrl,
       // Anthropic rejects requests without an output limit.
       maxTokens: cfg.maxTokens ?? Math.min(info.maxOutput, 8_192),
       timeoutMs: cfg.timeoutMs,

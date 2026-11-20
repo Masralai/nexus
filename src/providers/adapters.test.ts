@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { Anthropic, toAnthropicMessages } from "./anthropic"
 import { OpenAICompatible, toChatMessages } from "./openai-compatible"
+import { getPreset } from "./presets"
 import { ProviderError } from "./error"
 import type { ProviderEvent } from "./types"
 import type { Message, ToolDefinition } from "../engine/types"
@@ -196,4 +197,22 @@ test("openai: sends system first and parses streamed usage", async () => {
     content: "Hi",
     usage: { inputTokens: 10, outputTokens: 2, reasoningTokens: 1, cacheReadTokens: 4 },
   })
+})
+
+test("commandcode preset posts to the provider endpoint", async () => {
+  const preset = getPreset("commandcode")
+  expect(preset).toBeDefined()
+  let url = ""
+  const p = new OpenAICompatible({
+    apiKey: "cmd-key",
+    model: preset!.suggestedModels[0],
+    contextWindow: 1_000_000,
+    baseUrl: preset!.baseUrl,
+    fetchImpl: (async (input: string | URL | Request) => {
+      url = String(input)
+      return new Response(fixture("openai-compatible", "text-stream.sse"), { status: 200 })
+    }) as unknown as typeof fetch,
+  })
+  await collect(p.stream([{ role: "user", content: "hi" }], emptyTools, {}))
+  expect(url).toBe("https://api.commandcode.ai/provider/v1/chat/completions")
 })

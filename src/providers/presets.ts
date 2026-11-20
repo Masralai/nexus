@@ -111,6 +111,17 @@ export const PRESETS: Preset[] = [
     requiresKey: true,
   },
   {
+    // Same id, endpoint and env key as the reference catalog entry. Default wire
+    // is OpenAI-compatible chat; Claude models are routed over the Anthropic wire.
+    id: "commandcode",
+    label: "Command Code",
+    adapter: "openai-compatible",
+    baseUrl: "https://api.commandcode.ai/provider/v1",
+    suggestedModels: ["deepseek/deepseek-v4.1-flash", "moonshotai/Kimi-K3", "gpt-6.1-sol"],
+    envKeys: ["CMD_API_KEY"],
+    requiresKey: true,
+  },
+  {
     id: "ollama",
     label: "Ollama",
     adapter: "openai-compatible",

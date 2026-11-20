@@ -210,23 +210,30 @@ export function Shell({ client }: { client: NexusClient }) {
                     then: (apiKey) => {
                       const preset = otherPreset(customId.trim() || "custom", baseUrl.trim())
                       const model = loadConfig().model
-                      void client
-                        .updateConfig({
-                          preset: preset.id,
-                          provider: preset.adapter,
-                          baseUrl: preset.baseUrl,
-                          apiKey,
-                          ...(model ? { model } : {}),
-                        })
-                        .then(() => {
+                      void (async () => {
+                        try {
+                          pushLog(`verifying key (${preset.id})…`)
+                          const check = (await client.verifyProvider({ preset: preset.id, apiKey, baseUrl: preset.baseUrl, ...(model ? { model } : {}) })) as { ok: boolean; error?: string }
+                          if (!check.ok) {
+                            setOverlay(null)
+                            pushLog(`key check failed: ${check.error ?? "unknown error"}`)
+                            return
+                          }
+                          await client.updateConfig({
+                            preset: preset.id,
+                            provider: preset.adapter,
+                            baseUrl: preset.baseUrl,
+                            apiKey,
+                            ...(model ? { model } : {}),
+                          })
                           setOverlay(null)
                           pushLog(`connected: ${preset.id}`)
                           setLive((s) => ({ ...s, status: { ...s.status, model: model || "?" } }))
-                        })
-                        .catch((error) => {
+                        } catch (error) {
                           setOverlay(null)
                           pushLog(`connect failed: ${error instanceof Error ? error.message : String(error)}`)
-                        })
+                        }
+                      })()
                     },
                   })
                 },
@@ -242,28 +249,37 @@ export function Shell({ client }: { client: NexusClient }) {
           mask: true,
           then: (apiKey) => {
             const key = apiKey || (preset.id === "ollama" ? "ollama" : apiKey)
-            if (!key) {
+            if (!key && preset.requiresKey) {
               pushLog("key required")
               setOverlay(null)
               return
             }
             const model = loadConfig().model || preset.suggestedModels[0] || ""
-            void client
-              .updateConfig({
-                preset: preset.id,
-                apiKey: key,
-                ...(preset.baseUrl ? { baseUrl: preset.baseUrl } : {}),
-                ...(model ? { model } : {}),
-              })
-              .then(() => {
+            void (async () => {
+              try {
+                if (key) {
+                  pushLog(`verifying key (${preset.label})…`)
+                  const check = (await client.verifyProvider({ preset: preset.id, apiKey: key, ...(preset.baseUrl ? { baseUrl: preset.baseUrl } : {}), ...(model ? { model } : {}) })) as { ok: boolean; error?: string }
+                  if (!check.ok) {
+                    setOverlay(null)
+                    pushLog(`key check failed: ${check.error ?? "unknown error"}`)
+                    return
+                  }
+                }
+                await client.updateConfig({
+                  preset: preset.id,
+                  apiKey: key || "ollama",
+                  ...(preset.baseUrl ? { baseUrl: preset.baseUrl } : {}),
+                  ...(model ? { model } : {}),
+                })
                 setOverlay(null)
                 pushLog(`connected: ${preset.label}`)
                 setLive((s) => ({ ...s, status: { ...s.status, model: model || "?" } }))
-              })
-              .catch((error) => {
+              } catch (error) {
                 setOverlay(null)
                 pushLog(`connect failed: ${error instanceof Error ? error.message : String(error)}`)
-              })
+              }
+            })()
           },
         })
       },

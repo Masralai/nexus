@@ -134,6 +134,7 @@ export function launchRuntime(opts: LaunchOpts = {}): Runtime {
   const apiKey = resolveApiKey(cfg) ?? plugins.auth(cfg.provider)?.apiKey
   const common = {
     provider: cfg.provider,
+    preset: cfg.preset,
     apiKey,
     baseUrl: cfg.baseUrl,
   }

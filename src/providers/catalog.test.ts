@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { estimateCost, getModelInfo } from "./catalog"
+import { PRESETS } from "./presets"
 
 test("unknown models fall back without guessing capabilities", () => {
   const info = getModelInfo("some-future-model")
@@ -11,6 +12,14 @@ test("catalog resolves snapshots and provider-prefixed ids", () => {
   expect(getModelInfo("claude-sonnet-4-20250514").id).toBe("claude-sonnet-4-20250514")
   expect(getModelInfo("anthropic/claude-sonnet-4-20250514").id).toBe("claude-sonnet-4-20250514")
   expect(getModelInfo("gpt-4o-mini-2024-07-18").id).toBe("gpt-4o-mini")
+})
+
+test("commandcode suggested models resolve from the pinned snapshot", () => {
+  const preset = PRESETS.find((p) => p.id === "commandcode")
+  expect(preset).toBeDefined()
+  for (const model of preset!.suggestedModels) {
+    expect({ model, id: getModelInfo(model).id }).not.toMatchObject({ id: "unknown" })
+  }
 })
 
 test("cost prices cache reads and writes on top of total input", () => {

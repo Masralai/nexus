@@ -40,6 +40,12 @@ const ENTRIES: ModelInfo[] = [
   { id: "mistral-large-latest", contextWindow: 128_000, maxOutput: 8_192, tools: true, vision: false, reasoning: false, caching: false, cost: { input: 2, output: 6 } },
   { id: "grok-4", contextWindow: 256_000, maxOutput: 64_000, tools: true, vision: true, reasoning: true, caching: true, cost: { input: 3, output: 15 } },
   { id: "command-r-plus", contextWindow: 128_000, maxOutput: 4_096, tools: true, vision: false, reasoning: false, caching: false, cost: { input: 2.5, output: 10 } },
+  // Command Code (provider API): limits, capabilities and no-markup pricing
+  // match the reference provider catalog. Claude models use the Anthropic wire
+  // via a per-model adapter override.
+  { id: "deepseek-v4.1-flash", contextWindow: MB, maxOutput: 384_000, tools: true, vision: true, reasoning: true, caching: true, cost: { input: 0.15, output: 0.6 } },
+  { id: "kimi-k3", contextWindow: MB, maxOutput: 131_072, tools: true, vision: true, reasoning: true, caching: true, cost: { input: 3, output: 15 } },
+  { id: "gpt-6.1-sol", contextWindow: 1_050_000, maxOutput: 128_000, tools: true, vision: true, reasoning: true, caching: true, cost: { input: 2, output: 10 } },
 ]
 
 const FALLBACK: ModelInfo = {
